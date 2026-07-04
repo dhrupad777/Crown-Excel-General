@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+
+<html lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;700&amp;family=Inter:wght@400;600;700&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet"/><script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script><script id="tailwind-config">try{
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        "colors": {
+                "surface-container-low": "#f2f4f6",
+                "on-surface": "#191c1e",
+                "primary-fixed-dim": "#bec6e0",
+                "on-surface-variant": "#45464d",
+                "surface-container-highest": "#e0e3e5",
+                "on-secondary-fixed": "#001a42",
+                "secondary-container": "#2170e4",
+                "secondary": "#0058be",
+                "primary": "#000000",
+                "primary-container": "#131b2e",
+                "inverse-on-surface": "#eff1f3",
+                "on-primary-fixed-variant": "#3f465c",
+                "on-tertiary": "#ffffff",
+                "tertiary": "#000000",
+                "tertiary-container": "#0b1c30",
+                "surface": "#f7f9fb",
+                "on-primary-fixed": "#131b2e",
+                "surface-variant": "#e0e3e5",
+                "surface-tint": "#565e74",
+                "on-primary": "#ffffff",
+                "on-primary-container": "#7c839b",
+                "outline-variant": "#c6c6cd",
+                "background": "#f7f9fb",
+                "surface-bright": "#f7f9fb",
+                "error": "#ba1a1a",
+                "on-background": "#191c1e",
+                "surface-container-high": "#e6e8ea",
+                "primary-fixed": "#dae2fd",
+                "secondary-fixed-dim": "#adc6ff",
+                "surface-container-lowest": "#ffffff",
+                "on-error-container": "#93000a",
+                "on-tertiary-fixed-variant": "#38485d",
+                "on-tertiary-container": "#75859d",
+                "surface-container": "#eceef0",
+                "inverse-surface": "#2d3133",
+                "secondary-fixed": "#d8e2ff",
+                "surface-dim": "#d8dadc",
+                "on-secondary": "#ffffff",
+                "on-error": "#ffffff",
+                "on-tertiary-fixed": "#0b1c30",
+                "on-secondary-container": "#fefcff",
+                "outline": "#76777d",
+                "tertiary-fixed-dim": "#b7c8e1",
+                "error-container": "#ffdad6",
+                "tertiary-fixed": "#d3e4fe",
+                "inverse-primary": "#bec6e0",
+                "on-secondary-fixed-variant": "#004395"
+        },
+        "borderRadius": {
+                "DEFAULT": "0.25rem",
+                "lg": "0.5rem",
+                "xl": "0.75rem",
+                "full": "9999px"
+        },
+        "spacing": {
+                "container-max": "1280px",
+                "unit-sm": "8px",
+                "unit-lg": "32px",
+                "unit-xl": "64px",
+                "gutter": "24px",
+                "margin-desktop": "64px",
+                "unit-md": "16px",
+                "unit-xs": "4px",
+                "margin-mobile": "20px"
+        },
+        "fontFamily": {
+                "headline-lg-mobile": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "headline-lg": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "headline-md": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "body-lg": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "body-md": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "caption": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "display-lg": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "label-md": [
+                        "Helvetica", "Arial", "sans-serif"
+                ],
+                "data-mono": [
+                        "Helvetica", "Arial", "sans-serif"
+                ]
+        },
+        "fontSize": {
+                "headline-lg-mobile": [
+                        "28px",
+                        {
+                                "lineHeight": "36px",
+                                "fontWeight": "600"
+                        }
+                ],
+                "headline-lg": [
+                        "32px",
+                        {
+                                "lineHeight": "40px",
+                                "letterSpacing": "-0.01em",
+                                "fontWeight": "600"
+                        }
+                ],
+                "headline-md": [
+                        "24px",
+                        {
+                                "lineHeight": "32px",
+                                "fontWeight": "600"
+                        }
+                ],
+                "body-lg": [
+                        "18px",
+                        {
+                                "lineHeight": "28px",
+                                "fontWeight": "400"
+                        }
+                ],
+                "body-md": [
+                        "16px",
+                        {
+                                "lineHeight": "24px",
+                                "fontWeight": "400"
+                        }
+                ],
+                "caption": [
+                        "12px",
+                        {
+                                "lineHeight": "16px",
+                                "fontWeight": "400"
+                        }
+                ],
+                "display-lg": [
+                        "48px",
+                        {
+                                "lineHeight": "56px",
+                                "letterSpacing": "-0.02em",
+                                "fontWeight": "700"
+                        }
+                ],
+                "label-md": [
+                        "14px",
+                        {
+                                "lineHeight": "20px",
+                                "letterSpacing": "0.05em",
+                                "fontWeight": "600"
+                        }
+                ]
+        }
+},
+    },
+  }
+}catch(_e){}</script></head><body class="bg-background text-on-surface flex min-h-screen font-body-md">
+<!-- SideNavBar (Shared Component) -->
+<aside class="hidden md:flex flex-col h-full bg-surface-container-lowest h-screen w-64 fixed left-0 top-0 border-r border-outline-variant z-40">
+<div class="p-6 border-b border-outline-variant">
+<h1 class="font-headline-md text-headline-md font-bold tracking-tighter text-primary">Crown Excel General</h1>
+<p class="font-label-md text-label-md text-outline mt-1">V2.04_STABLE</p>
+</div>
+<nav class="flex-1 py-4 overflow-y-auto">
+<ul class="space-y-1">
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="grid_view">grid_view</span>
+<span class="font-body-md text-body-md font-bold">Dashboard</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="inventory_2">inventory_2</span>
+<span class="font-body-md text-body-md font-bold">Inventory</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 bg-surface-container-low text-primary border-r-4 border-primary translate-x-1 duration-300 transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="point_of_sale">point_of_sale</span>
+<span class="font-body-md text-body-md font-bold text-primary">Billing Desk</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="settings_backup_restore">settings_backup_restore</span>
+<span class="font-body-md text-body-md font-bold">RMA Tracking</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="business">business</span>
+<span class="font-body-md text-body-md font-bold">Wholesale</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="monitoring">monitoring</span>
+<span class="font-body-md text-body-md font-bold">Analytics</span>
+</a>
+</li>
+</ul>
+</nav>
+<div class="p-4 border-t border-outline-variant">
+<button class="w-full py-2 bg-primary text-on-primary rounded font-body-md text-body-md font-bold transition-shadow flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">qr_code_scanner</span>
+                Quick Scan
+            </button>
+<div class="mt-4 flex justify-between px-2">
+<a aria-label="Support" class="text-outline hover:text-on-surface transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="help_center">help_center</span>
+</a>
+<a aria-label="Settings" class="text-outline hover:text-on-surface transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+</a>
+</div>
+</div>
+</aside>
+<!-- Main Content Area -->
+<div class="flex-1 flex flex-col min-w-0 md:ml-64">
+<!-- TopAppBar (Shared Component) -->
+<header class="flex justify-between items-center px-gutter h-16 w-full docked full-width top-0 sticky z-50 bg-surface-container-lowest/90 backdrop-blur-md shadow-sm border-b border-outline-variant relative overflow-hidden">
+<div class="flex items-center gap-4">
+<span class="font-headline-md text-headline-md text-primary font-bold">SCAN_CORE_TERMINAL</span>
+</div>
+<div class="flex items-center gap-4">
+<button class="px-4 py-1.5 border border-primary text-primary rounded font-label-md text-label-md hover:bg-primary/5 transition-colors bg-surface-container-lowest font-bold">
+                    NEW_INVOICE
+                </button>
+<div class="w-8 h-8 rounded-full bg-surface-container border border-outline-variant flex items-center justify-center overflow-hidden">
+<img alt="Admin Session" class="w-full h-full object-cover" data-alt="A small circular avatar placeholder image showing a silhouette of a person against a dark tech-themed background, suitable for a dark mode interface." src="https://lh3.googleusercontent.com/aida-public/AB6AXuD99DQoXutAewYhcflmQsLJQQPH8SoUJc_YY8FoKGLTZkaIGo5HIemhhhSQOrR7EGFWB8c8EAeFKYzd1q8oYYyDNHwNTzLae54JmHzpC2Us6zOCEh3Q3jQJQ8yVTZhAvkSzY6at39QBOTpJrGQcwhp-twN456Mw-_aRWGo2QxkP4uH__mkjl1nroUzwSsnuSqlrcqfofez8PPn4dks5hLKpo15hK0otNFxXssgguPGjKfOfTzW-3NXEWw"/>
+</div>
+</div>
+</header>
+<!-- Canvas -->
+<main class="flex-1 p-gutter overflow-y-auto max-w-container-max mx-auto w-full">
+<!-- Header Section -->
+<div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+<div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface font-bold">Invoices &amp; Warranty Archive</h2>
+<p class="font-body-md text-body-md text-outline mt-1">High-speed query engine for past operations.</p>
+</div>
+</div>
+<!-- Summary Stats Bar -->
+<div class="grid grid-cols-1 gap-4 mb-6 md:grid-cols-3">
+<div class="bg-surface-container-lowest p-4 rounded-lg border border-outline-variant shadow-sm flex flex-col justify-center relative">
+<span class="material-symbols-outlined absolute top-4 right-4 text-[#2563eb]">payments</span>
+<span class="text-label-md font-bold text-on-surface-variant uppercase tracking-wider">Total Revenue</span>
+<span class="text-headline-md font-bold text-primary mt-1">$1,245,600.00</span>
+</div>
+<div class="bg-surface-container-lowest p-4 rounded-lg border border-outline-variant shadow-sm flex flex-col justify-center relative">
+<span class="material-symbols-outlined absolute top-4 right-4 text-[#2563eb]">receipt_long</span>
+<span class="text-label-md font-bold text-on-surface-variant uppercase tracking-wider">Total Invoices</span>
+<span class="text-headline-md font-bold text-primary mt-1">12,408</span>
+</div>
+<button class="bg-[#2563eb] text-white p-4 rounded-lg border border-[#2563eb] shadow-sm flex items-center justify-center gap-2 hover:bg-[#2563eb]/90 transition-colors font-bold h-full">
+<span class="material-symbols-outlined">download</span>
+        Export Invoices &amp; IMEIs CSV
+    </button>
+</div>
+<!-- Global Search Bar & Date Tabs -->
+<div class="bg-surface-container-lowest p-4 rounded-lg border border-outline-variant mb-6 shadow-sm flex flex-col xl:flex-row gap-4 items-center">
+<div class="relative w-full flex-1">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#2563eb] font-bold">search</span>
+<input class="w-full bg-surface-container-low border border-outline-variant text-on-surface rounded pl-10 pr-4 py-3 focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none transition-all font-body-md placeholder:text-outline font-bold" placeholder="Query by Ref, ID, Customer, Phone, Model, and IMEI..." type="text"/>
+</div>
+<div class="flex bg-surface-container-low p-1 rounded-lg border border-outline-variant">
+<button class="px-4 py-2 text-sm font-bold bg-surface-container-lowest border border-outline-variant rounded shadow-sm text-primary">All</button>
+<button class="px-4 py-2 text-sm font-bold text-on-surface-variant hover:text-on-surface transition-colors">Today</button>
+<button class="px-4 py-2 text-sm font-bold text-on-surface-variant hover:text-on-surface transition-colors">7 Days</button>
+<button class="px-4 py-2 text-sm font-bold text-on-surface-variant hover:text-on-surface transition-colors">Month</button>
+</div>
+</div>
+<!-- Data Table Container -->
+<div class="bg-surface-container-lowest rounded-lg border border-outline-variant overflow-hidden shadow-sm">
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse whitespace-nowrap">
+<thead>
+<tr class="bg-surface-container-low border-b border-outline-variant"><th class="p-4 font-label-md text-label-md text-on-surface-variant uppercase tracking-wider font-bold">WhatsApp Ref</th><th class="p-4 font-label-md text-label-md text-on-surface-variant uppercase tracking-wider font-bold">ID</th><th class="p-4 font-label-md text-label-md text-on-surface-variant uppercase tracking-wider font-bold">Customer</th><th class="p-4 font-label-md text-label-md text-on-surface-variant uppercase tracking-wider font-bold text-center">Items</th><th class="p-4 font-label-md text-label-md text-on-surface-variant uppercase tracking-wider font-bold">Total</th></tr>
+</thead>
+<tbody class="font-body-md text-body-md">
+<tr class="border-b border-outline-variant bg-surface-container-lowest hover:bg-surface-container-low transition-colors group"><td class="p-4 font-bold text-primary">WA-1092</td><td class="p-4 font-bold text-primary">INV-9021A</td><td class="p-4 text-on-surface font-bold">Alex Mercer</td><td class="p-4 text-center font-bold">2</td><td class="p-4 text-on-surface font-bold">$1,249.00</td></tr>
+<tr class="border-b border-outline-variant bg-surface-container-lowest hover:bg-surface-container-low transition-colors group"><td class="p-4 font-bold text-primary">WA-1091</td><td class="p-4 font-bold text-primary">INV-9020B</td><td class="p-4 text-on-surface font-bold">TechCorp Wholesale</td><td class="p-4 text-center font-bold">15</td><td class="p-4 text-on-surface font-bold">$8,450.00</td></tr>
+<tr class="border-b border-outline-variant bg-surface-container-lowest hover:bg-surface-container-low transition-colors group"><td class="p-4 font-bold text-primary">WA-1090</td><td class="p-4 font-bold text-primary">INV-9019C</td><td class="p-4 text-on-surface font-bold">Sarah Connor</td><td class="p-4 text-center font-bold">1</td><td class="p-4 text-on-surface font-bold">$899.50</td></tr>
+<tr class="bg-surface-container-lowest hover:bg-surface-container-low transition-colors group"><td class="p-4 font-bold text-primary">WA-1089</td><td class="p-4 font-bold text-primary">INV-9018D</td><td class="p-4 text-on-surface font-bold">Nexus Electronics</td><td class="p-4 text-center font-bold">5</td><td class="p-4 text-on-surface font-bold">$3,200.00</td></tr></tbody></table></div></div></main></div></body></html>

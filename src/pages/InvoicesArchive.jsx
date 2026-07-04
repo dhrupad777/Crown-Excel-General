@@ -35,6 +35,9 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
   useEffect(() => {
     loadInvoices();
+    const handleDataChange = () => loadInvoices();
+    window.addEventListener('crown-data-change', handleDataChange);
+    return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
 
   // Open specific invoice if requested via initialInvoiceId

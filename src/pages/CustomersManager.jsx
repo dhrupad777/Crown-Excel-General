@@ -36,6 +36,9 @@ export const CustomersManager = () => {
 
   useEffect(() => {
     loadCustomers();
+    const handleDataChange = () => loadCustomers();
+    window.addEventListener('crown-data-change', handleDataChange);
+    return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
 
   // Filter customers

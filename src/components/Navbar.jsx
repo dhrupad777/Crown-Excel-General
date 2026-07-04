@@ -30,6 +30,9 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     window.addEventListener('online', () => setIsOnline(true));
     window.addEventListener('offline', () => setIsOnline(false));
 
+    const handleDataChange = () => setStats(storageService.getDashboardStats());
+    window.addEventListener('crown-data-change', handleDataChange);
+
     // Refresh stats & clock
     const interval = setInterval(() => {
       setStats(storageService.getDashboardStats());
@@ -38,6 +41,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
 
     return () => {
       window.removeEventListener('network-status-change', handleNetwork);
+      window.removeEventListener('crown-data-change', handleDataChange);
       clearInterval(interval);
     };
   }, []);

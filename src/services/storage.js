@@ -1,6 +1,8 @@
-// High-Speed Dual-Mode Storage Engine (Local IndexedDB/localStorage + Cloud Sync)
-// Guarantees 0ms latency for scanning and querying in low-internet environments.
+// High-Speed Dual-Mode Storage Engine (Local IndexedDB/localStorage + Live Firebase Cloud Sync)
+// Guarantees 0ms latency for scanning and querying while syncing everything in real-time to Firebase.
 // Domain: Electronics (Laptops, Mobile Phones, Tablets, Audio, Wearables & Accessories)
+
+import { firebaseService } from './firebase';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'crown_excel_products_v2',
@@ -68,6 +70,8 @@ const INITIAL_INVOICES = [
 class StorageService {
   constructor() {
     this.initSeedData();
+    // Stitch with Firebase: start real-time cloud sync after short delay for Firestore initialization
+    setTimeout(() => this.initCloudSync(), 1500);
   }
 
   initSeedData() {
@@ -80,6 +84,49 @@ class StorageService {
     if (!localStorage.getItem(STORAGE_KEYS.INVOICES)) {
       localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(INITIAL_INVOICES));
     }
+  }
+
+  // Real-Time Firebase Cloud Synchronization
+  initCloudSync() {
+    if (!firebaseService.isInitialized) return;
+
+    console.log("⚡ Stitching local storage with live Firebase database...");
+
+    // Subscribe to Products
+    firebaseService.subscribeToCollection('products', (cloudProducts) => {
+      if (cloudProducts && cloudProducts.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(cloudProducts));
+        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
+      } else {
+        // If cloud collection is empty, push our local seed inventory to Firebase!
+        const localProds = this.getProducts();
+        localProds.forEach(p => firebaseService.saveToCloud('products', p.id, p));
+      }
+    });
+
+    // Subscribe to Customers
+    firebaseService.subscribeToCollection('customers', (cloudCustomers) => {
+      if (cloudCustomers && cloudCustomers.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(cloudCustomers));
+        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
+      } else {
+        // If cloud collection is empty, push seed customers to Firebase!
+        const localCusts = this.getCustomers();
+        localCusts.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
+      }
+    });
+
+    // Subscribe to Invoices
+    firebaseService.subscribeToCollection('invoices', (cloudInvoices) => {
+      if (cloudInvoices && cloudInvoices.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(cloudInvoices));
+        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+      } else {
+        // If cloud collection is empty, push seed invoices to Firebase!
+        const localInvs = this.getInvoices();
+        localInvs.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
+      }
+    });
   }
 
   // --- PRODUCTS ---
@@ -101,23 +148,36 @@ class StorageService {
   saveProduct(product) {
     const products = this.getProducts();
     let updated;
-    if (product.id && products.some(p => p.id === product.id)) {
-      updated = products.map(p => p.id === product.id ? { ...p, ...product } : p);
+    const isNew = !product.id || !products.some(p => p.id === product.id);
+    const savedProd = {
+      ...product,
+      id: product.id || 'prod-' + Date.now(),
+      barcode: product.barcode || Math.floor(1000000 + Math.random() * 9000000).toString()
+    };
+
+    if (!isNew) {
+      updated = products.map(p => p.id === savedProd.id ? savedProd : p);
     } else {
-      const newProd = {
-        ...product,
-        id: product.id || 'prod-' + Date.now(),
-        barcode: product.barcode || Math.floor(1000000 + Math.random() * 9000000).toString()
-      };
-      updated = [newProd, ...products];
+      updated = [savedProd, ...products];
     }
+
+    // 1. Instant 0ms Local Save
     localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(updated));
-    return product.id ? product : updated[0];
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
+
+    // 2. Live Cloud Firebase Sync
+    firebaseService.saveToCloud('products', savedProd.id, savedProd);
+
+    return savedProd;
   }
 
   deleteProduct(id) {
     const products = this.getProducts().filter(p => p.id !== id);
     localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
+
+    // Delete from live Firebase cloud
+    firebaseService.deleteFromCloud('products', id);
     return true;
   }
 
@@ -145,24 +205,37 @@ class StorageService {
   saveCustomer(customer) {
     const customers = this.getCustomers();
     let updated;
-    if (customer.id && customers.some(c => c.id === customer.id)) {
-      updated = customers.map(c => c.id === customer.id ? { ...c, ...customer } : c);
+    const isNew = !customer.id || !customers.some(c => c.id === customer.id);
+    const savedCust = {
+      ...customer,
+      id: customer.id || 'cust-' + Date.now(),
+      totalSpent: customer.totalSpent || 0,
+      ordersCount: customer.ordersCount || 0
+    };
+
+    if (!isNew) {
+      updated = customers.map(c => c.id === savedCust.id ? savedCust : c);
     } else {
-      const newCust = {
-        ...customer,
-        id: customer.id || 'cust-' + Date.now(),
-        totalSpent: customer.totalSpent || 0,
-        ordersCount: customer.ordersCount || 0
-      };
-      updated = [newCust, ...customers];
+      updated = [savedCust, ...customers];
     }
+
+    // 1. Instant 0ms Local Save
     localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(updated));
-    return customer.id ? customer : updated[0];
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
+
+    // 2. Live Cloud Firebase Sync
+    firebaseService.saveToCloud('customers', savedCust.id, savedCust);
+
+    return savedCust;
   }
 
   deleteCustomer(id) {
     const customers = this.getCustomers().filter(c => c.id !== id);
     localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
+
+    // Delete from live Firebase cloud
+    firebaseService.deleteFromCloud('customers', id);
     return true;
   }
 
@@ -218,36 +291,54 @@ class StorageService {
         const customers = this.getCustomers();
         const updatedCusts = customers.map(c => {
           if (c.id === savedInv.customer.id) {
-            return {
+            const newCustObj = {
               ...c,
               totalSpent: (c.totalSpent || 0) + (savedInv.total || 0),
               ordersCount: (c.ordersCount || 0) + 1
             };
+            // Sync updated customer stats to Firebase!
+            firebaseService.saveToCloud('customers', newCustObj.id, newCustObj);
+            return newCustObj;
           }
           return c;
         });
         localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(updatedCusts));
+        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
       }
 
-      // Decrement product stock
+      // Decrement product stock & sync to Firebase
       const products = this.getProducts();
       const updatedProds = products.map(p => {
         const itemInBill = savedInv.items?.find(i => i.id === p.id || i.barcode === p.barcode);
         if (itemInBill) {
-          return { ...p, stock: Math.max(0, (p.stock || 0) - (itemInBill.qty || 1)) };
+          const newProdObj = { ...p, stock: Math.max(0, (p.stock || 0) - (itemInBill.qty || 1)) };
+          // Sync decremented stock to Firebase!
+          firebaseService.saveToCloud('products', newProdObj.id, newProdObj);
+          return newProdObj;
         }
         return p;
       });
       localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(updatedProds));
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
     }
 
+    // 1. Instant 0ms Local Save
     localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(updated));
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+
+    // 2. Live Cloud Firebase Sync
+    firebaseService.saveToCloud('invoices', savedInv.id, savedInv);
+
     return savedInv;
   }
 
   deleteInvoice(id) {
     const invoices = this.getInvoices().filter(inv => inv.id !== id);
     localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(invoices));
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+
+    // Delete from live Firebase cloud
+    firebaseService.deleteFromCloud('invoices', id);
     return true;
   }
 
@@ -273,6 +364,12 @@ class StorageService {
     localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(INITIAL_PRODUCTS));
     localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(INITIAL_CUSTOMERS));
     localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(INITIAL_INVOICES));
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
+
+    // Push reset seed data to live Firebase cloud!
+    INITIAL_PRODUCTS.forEach(p => firebaseService.saveToCloud('products', p.id, p));
+    INITIAL_CUSTOMERS.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
+    INITIAL_INVOICES.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
     return true;
   }
 
@@ -288,9 +385,19 @@ class StorageService {
   importAllData(jsonString) {
     try {
       const data = JSON.parse(jsonString);
-      if (data.products) localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(data.products));
-      if (data.customers) localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(data.customers));
-      if (data.invoices) localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(data.invoices));
+      if (data.products) {
+        localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(data.products));
+        data.products.forEach(p => firebaseService.saveToCloud('products', p.id, p));
+      }
+      if (data.customers) {
+        localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(data.customers));
+        data.customers.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
+      }
+      if (data.invoices) {
+        localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(data.invoices));
+        data.invoices.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
+      }
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
       return true;
     } catch (e) {
       console.error("Import failed:", e);

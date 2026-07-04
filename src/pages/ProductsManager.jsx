@@ -41,6 +41,9 @@ export const ProductsManager = () => {
 
   useEffect(() => {
     loadProducts();
+    const handleDataChange = () => loadProducts();
+    window.addEventListener('crown-data-change', handleDataChange);
+    return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
 
   // Filter products
