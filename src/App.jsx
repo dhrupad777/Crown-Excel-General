@@ -85,9 +85,9 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#070b12] text-slate-100">
+    <div className="min-h-screen flex flex-col bg-[#f7f9fb] text-slate-900 font-body">
       
-      {/* Top Navigation Bar */}
+      {/* Sidebar & Top Navigation */}
       <Navbar 
         activeTab={activeTab} 
         setActiveTab={(tab) => {
@@ -97,8 +97,8 @@ export function App() {
         onOpenSettings={() => setShowSettings(true)} 
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 pb-16">
+      {/* Main Content Area (Offset by 280px on desktop for Left Sidebar) */}
+      <main className="flex-1 md:ml-[280px] pb-20">
         {activeTab === 'billing' && (
           <BillingDesk onViewInvoice={handleViewInvoice} />
         )}
@@ -113,19 +113,19 @@ export function App() {
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-white/5 bg-slate-950/80 py-4 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2">
+      {/* Footer (Offset by 280px on desktop) */}
+      <footer className="border-t border-slate-200 bg-white py-4 mt-auto md:ml-[280px] shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2">
           <div>
-            © {new Date().getFullYear()} <span className="font-heading font-bold text-emerald-400">Crown Excel Electronics</span> • Enterprise Laptops, Mobile Phones & Gadgets Billing Platform
+            © {new Date().getFullYear()} <span className="font-heading font-bold text-[#2563eb]">Crown Excel Electronics</span> • Enterprise Laptops, Phones & Gadgets Platform
           </div>
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1 text-emerald-400">
+            <span className="flex items-center gap-1 text-[#2563eb] font-semibold">
               <ShieldCheck className="w-3.5 h-3.5" /> 0ms Latency Local Cache
             </span>
             <span>•</span>
-            <span className="flex items-center gap-1 text-cyan-400">
-              <Cloud className="w-3.5 h-3.5" /> Firebase Offline-First
+            <span className="flex items-center gap-1 text-slate-700 font-semibold">
+              <Cloud className="w-3.5 h-3.5 text-[#2563eb]" /> Firebase Offline-First
             </span>
           </div>
         </div>
