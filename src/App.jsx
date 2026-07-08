@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   Database,
   RefreshCw,
@@ -28,6 +28,11 @@ export function App() {
   const { isAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState('billing');
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
+
+  // Tracks whether the Billing Desk holds an unfinalized bill, so we can warn before navigating
+  // away and discarding it. A ref (not state) — it only needs to be read at navigation time.
+  const billDirtyRef = useRef(false);
+  const handleBillDirty = useCallback((dirty) => { billDirtyRef.current = dirty; }, []);
   
   // Settings Modal State
   const [showSettings, setShowSettings] = useState(false);
@@ -105,6 +110,14 @@ export function App() {
       <Navbar
         activeTab={activeTab}
         setActiveTab={(tab) => {
+          // Guard against silently discarding an in-progress bill: leaving the Billing Desk
+          // unmounts it and loses the scanned items, so confirm first when one is unfinalized.
+          if (activeTab === 'billing' && tab !== 'billing' && billDirtyRef.current) {
+            const leave = window.confirm(
+              'This bill has not been finalized yet.\n\nIf you leave the Billing Desk now, the scanned items and attached customer will be discarded. Finalize the bill first to keep it.\n\nLeave anyway?'
+            );
+            if (!leave) return;
+          }
           setActiveTab(tab);
           if (tab !== 'invoices') setSelectedInvoiceId(null);
         }}
@@ -114,7 +127,7 @@ export function App() {
       {/* Main Content Area (Offset by 280px on desktop for Left Sidebar) */}
       <main className="flex-1 md:ml-[280px] pb-20">
         {activeTab === 'billing' && (
-          <BillingDesk onViewInvoice={handleViewInvoice} />
+          <BillingDesk onViewInvoice={handleViewInvoice} onDirtyChange={handleBillDirty} />
         )}
         {activeTab === 'invoices' && (
           <InvoicesArchive initialInvoiceId={selectedInvoiceId} />
@@ -132,7 +145,7 @@ export function App() {
           <SerialRegistry />
         )}
         {activeTab === 'dashboard' && (
-          <RegistrationsDashboard />
+          <RegistrationsDashboard onViewInvoice={handleViewInvoice} />
         )}
         {activeTab === 'admin' && isAdmin && (
           <AdminPage />

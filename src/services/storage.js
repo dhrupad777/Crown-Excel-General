@@ -413,10 +413,22 @@ class StorageService {
     const invoices = this.getInvoices();
     let updated;
     const isNew = !invoice.id || !invoices.some(i => i.id === invoice.id);
+    const me = this._currentUser || {};
     const savedInv = {
       ...invoice,
       id: invoice.id || this.getNextInvoiceNumber(),
-      date: invoice.date || new Date().toISOString()
+      date: invoice.date || new Date().toISOString(),
+      // Stamp who billed it and from which store — but only on a brand-new invoice, and only if
+      // not already set, so later updates (e.g. raising/resolving a query) never overwrite the
+      // original biller/location.
+      ...(isNew && !invoice.billedBy
+        ? {
+            billedBy: me.email || '',
+            billedByName: me.displayName || '',
+            locationId: me.locationId || '',
+            locationName: this.getLocationName(me.locationId) || ''
+          }
+        : {})
     };
 
     if (!isNew) {
@@ -809,13 +821,15 @@ class StorageService {
     const customers = this.getCustomers();
 
     const totalItemsSold = invoices.reduce((sum, inv) => sum + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
+    const openQueries = invoices.filter((inv) => inv.query && !inv.query.resolved).length;
 
     return {
       invoicesCount: invoices.length,
       productsCount: products.length,
       customersCount: customers.length,
       serialsCount: this._serialsCache.length,
-      totalItemsSold
+      totalItemsSold,
+      openQueries
     };
   }
 

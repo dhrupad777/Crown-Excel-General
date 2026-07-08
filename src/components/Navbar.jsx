@@ -71,7 +71,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       items: [
         { id: 'serials', label: 'Serial Capture', icon: ScanLine },
         { id: 'registry', label: 'Serial Registry', icon: ShieldCheck, count: stats.serialsCount },
-        { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
+        { id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries },
       ]
     },
     ...(isAdmin ? [{
@@ -161,9 +161,17 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
                         {item.count}
                       </span>
                     )}
-                    {item.badge && !item.count && (
+                    {item.badge && !item.count && !item.alert && (
                       <span className="px-1.5 py-0.5 text-[9px] bg-blue-100 text-[#2563eb] rounded font-bold uppercase tracking-wider">
                         {item.badge}
+                      </span>
+                    )}
+                    {item.alert > 0 && (
+                      <span
+                        title={`${item.alert} open ${item.alert === 1 ? 'query' : 'queries'}`}
+                        className="min-w-[20px] px-1.5 py-0.5 text-[10px] bg-red-500 text-white rounded-full font-black text-center animate-pulse"
+                      >
+                        {item.alert}
                       </span>
                     )}
                   </button>

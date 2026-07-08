@@ -28,7 +28,7 @@ import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
 
-export const BillingDesk = ({ onViewInvoice }) => {
+export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   // Bill Items State
   const [items, setItems] = useState([]);
 
@@ -81,6 +81,25 @@ export const BillingDesk = ({ onViewInvoice }) => {
     window.addEventListener('crown-data-change', refreshPreview);
     return () => window.removeEventListener('crown-data-change', refreshPreview);
   }, []);
+
+  // A bill with scanned items but no saved invoice is unfinalized work. Report that "dirty" state
+  // up so App can warn before navigating away (the Billing Desk unmounts and the draft is lost),
+  // and guard a browser refresh/close the same way — so an in-progress invoice is never silently
+  // discarded. Cleared automatically once the bill is finalized/reset (items go back to empty).
+  const isDirty = items.length > 0;
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const warnOnUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warnOnUnload);
+    return () => window.removeEventListener('beforeunload', warnOnUnload);
+  }, [isDirty]);
 
   // Total unit count across all scanned items
   const totalUnits = items.reduce((acc, item) => acc + item.qty, 0);
@@ -605,7 +624,7 @@ export const BillingDesk = ({ onViewInvoice }) => {
               </div>
               {items.length > 0 && (
                 <button
-                  onClick={() => setItems([])}
+                  onClick={() => { if (window.confirm('Clear all scanned items from this bill? This cannot be undone.')) setItems([]); }}
                   className="text-xs text-red-600 hover:text-red-700 font-bold flex items-center gap-1 bg-red-50 px-3 py-1.5 rounded-lg border border-red-200 self-end sm:self-auto"
                 >
                   <Trash2 className="w-3.5 h-3.5" /> Clear All

@@ -9,7 +9,9 @@ import {
   Users,
   TrendingUp,
   RefreshCw,
-  Loader2
+  Loader2,
+  AlertTriangle,
+  ArrowRight
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 
@@ -45,16 +47,23 @@ const BreakdownCard = ({ title, icon: Icon, accent, entries, emptyLabel }) => {
   );
 };
 
-export const RegistrationsDashboard = () => {
+export const RegistrationsDashboard = ({ onViewInvoice }) => {
   const [stats, setStats] = useState(() => storageService.getSerialStats());
   const [dupCount, setDupCount] = useState(null);
   const [recentDuplicates, setRecentDuplicates] = useState([]);
   const [loadingDups, setLoadingDups] = useState(false);
+  const [openQueries, setOpenQueries] = useState(() =>
+    storageService.getInvoices().filter((i) => i.query && !i.query.resolved)
+  );
 
   useEffect(() => {
     const handleDataChange = (e) => {
-      if (!e.detail?.type || e.detail.type === 'serials' || e.detail.type === 'all') {
+      const type = e.detail?.type;
+      if (!type || type === 'serials' || type === 'all') {
         setStats(storageService.getSerialStats());
+      }
+      if (!type || type === 'invoices' || type === 'all') {
+        setOpenQueries(storageService.getInvoices().filter((i) => i.query && !i.query.resolved));
       }
     };
     window.addEventListener('crown-data-change', handleDataChange);
@@ -86,6 +95,45 @@ export const RegistrationsDashboard = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 font-body">
+
+      {/* Open bill queries — staff-raised concerns needing admin attention. Click to jump to the invoice. */}
+      {openQueries.length > 0 && (
+        <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-5 shadow-sm">
+          <div className="flex items-center gap-2.5 mb-3">
+            <div className="p-2 rounded-xl bg-red-100 border border-red-200 text-red-600 animate-pulse">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-heading font-black text-sm text-red-700 uppercase tracking-wider">
+                {openQueries.length} Open {openQueries.length === 1 ? 'Query' : 'Queries'} / Concern{openQueries.length === 1 ? '' : 's'}
+              </h3>
+              <p className="text-[11px] font-semibold text-red-500">Staff raised these bill concerns — click one to open the invoice and resolve it.</p>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {openQueries.map((inv) => (
+              <button
+                key={inv.id}
+                type="button"
+                onClick={() => onViewInvoice?.(inv.id)}
+                className="w-full text-left bg-white border border-red-200 rounded-xl px-4 py-2.5 hover:border-red-400 hover:bg-red-50/50 transition-colors flex items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <div className="font-black text-sm text-slate-900 flex items-center gap-2">
+                    <span className="font-mono">{inv.id}</span>
+                    <span className="text-slate-400 font-semibold">•</span>
+                    <span className="truncate font-bold text-slate-700">{inv.customer?.name || 'Unknown'}</span>
+                  </div>
+                  <div className="text-[11px] font-semibold text-slate-600 truncate mt-0.5">
+                    &ldquo;{inv.query?.note}&rdquo; — {inv.query?.raisedByName || inv.query?.raisedBy}
+                  </div>
+                </div>
+                <ArrowRight className="w-4 h-4 text-red-400 flex-shrink-0" />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Header */}
       <div className="bg-white border-2 border-slate-300 rounded-2xl p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm border-l-4 border-l-[#2563eb]">

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   FileText,
+  FileSpreadsheet,
   Printer,
   Download,
   Trash2,
@@ -10,12 +11,15 @@ import {
   Shield,
   Smartphone,
   CalendarRange,
-  AlertTriangle
+  AlertTriangle,
+  ChevronDown,
+  MapPin,
+  User
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
-import { exportToCsv, formatLocalDate } from '../utils/exportUtils';
+import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate } from '../utils/exportUtils';
 import { useAuth } from '../context/AuthContext';
 
 export const InvoicesArchive = ({ initialInvoiceId }) => {
@@ -32,6 +36,44 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showQueryForm, setShowQueryForm] = useState(false);
   const [queryNote, setQueryNote] = useState('');
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+
+  // Opens an invoice's detail modal from a clean state (collapsed serial groups, no query form).
+  const openInvoice = (inv) => {
+    setSelectedInvoice(inv);
+    setExpandedGroups(new Set());
+    setShowQueryForm(false);
+    setQueryNote('');
+    setShowDetailModal(true);
+  };
+
+  const toggleGroup = (key) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  // Collapses one invoice's line items into per-product groups, each carrying the running unit
+  // count and every serial in the order it was scanned — so 100 identical phones show as one
+  // row (Qty 100) with an expandable serial list instead of 100 rows.
+  const groupInvoiceItems = (items) => {
+    const groups = [];
+    const byKey = new Map();
+    (items || []).forEach((item) => {
+      const key = item.productId || item.barcode || `${item.name}|${item.sku || ''}`;
+      let g = byKey.get(key);
+      if (!g) {
+        g = { key, name: item.name, sku: item.sku || '', barcode: item.barcode || '', category: item.category || 'Electronics', qty: 0, serials: [] };
+        byKey.set(key, g);
+        groups.push(g);
+      }
+      g.qty += item.qty || 1;
+      String(item.imei || '').split(/[/,;]+/).map((s) => s.trim()).filter(Boolean).forEach((s) => g.serials.push(s));
+    });
+    return groups;
+  };
 
   // Close the calendar popover on an outside click — no dropdown elsewhere in this app needs
   // this (they close via explicit selection instead), but a calendar left open until you
@@ -60,15 +102,14 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
 
-  // Open specific invoice if requested via initialInvoiceId
+  // Open specific invoice if requested via initialInvoiceId (e.g. navigated from the dashboard
+  // query alert or a finalized bill).
   useEffect(() => {
     if (initialInvoiceId) {
       const inv = storageService.getInvoiceById(initialInvoiceId);
-      if (inv) {
-        setSelectedInvoice(inv);
-        setShowDetailModal(true);
-      }
+      if (inv) openInvoice(inv);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialInvoiceId]);
 
   // Filtered Invoices — text-match dimension is centralized in storageService.searchInvoices
@@ -115,6 +156,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
   // Totals of Filtered Records
   const totalFilteredItems = filteredInvoices.reduce((acc, inv) => acc + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
+  const openQueryCount = filteredInvoices.filter((i) => i.query && !i.query.resolved).length;
 
   // Handle Delete
   const handleDeleteInvoice = (id, e) => {
@@ -128,27 +170,27 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     }
   };
 
-  // Export to CSV (shared export utils — real Blob download, proper quoting)
-  const handleExportCSV = () => {
-    if (filteredInvoices.length === 0) {
-      alert("No invoices to export.");
-      return;
-    }
-
-    const headers = ["Invoice Number", "Date & Time", "Partner Name", "Partner Phone", "Items Count", "Serial Numbers Recorded"];
-    const rows = filteredInvoices.map(inv => [
-      inv.id,
-      new Date(inv.date).toLocaleString(),
-      inv.customer?.name || '',
-      inv.customer?.whatsapp || '',
-      inv.items?.length || 0,
-      inv.items?.map(i => i.imei ? `${i.name}: [${i.imei}]` : '').filter(Boolean).join('; ') || 'N/A'
-    ]);
-
-    const filenameDatePart = (dateFilter === 'custom' && customRangeStart && customRangeEnd)
+  // Export metadata + filename shared by every invoice export (bulk and per-invoice).
+  const exportMeta = () => ({
+    dateFilter: (dateFilter === 'custom' && customRangeStart && customRangeEnd)
+      ? `${formatLocalDate(customRangeStart)} to ${formatLocalDate(customRangeEnd)}`
+      : (dateFilter === 'all' ? 'All records' : dateFilter)
+  });
+  const exportFilename = (ext, tag) => {
+    const datePart = (dateFilter === 'custom' && customRangeStart && customRangeEnd)
       ? `${formatLocalDate(customRangeStart)}_to_${formatLocalDate(customRangeEnd)}`
       : formatLocalDate(new Date());
-    exportToCsv({ filename: `Crown_Excel_Invoices_${filenameDatePart}.csv`, headers, rows });
+    return `Crown_Excel_Invoices${tag ? '_' + tag : ''}_${datePart}.${ext}`;
+  };
+
+  // Full Excel workbook (Invoice Summary + Serial Details + Report Info) for the filtered set.
+  const handleExportExcel = () => {
+    if (filteredInvoices.length === 0) { alert("No invoices to export."); return; }
+    exportInvoicesXlsx(filteredInvoices, exportFilename('xlsx'), exportMeta());
+  };
+  const handleExportCSV = () => {
+    if (filteredInvoices.length === 0) { alert("No invoices to export."); return; }
+    exportInvoicesCsv(filteredInvoices, exportFilename('csv'), exportMeta());
   };
 
   // Print Invoice Function
@@ -161,17 +203,6 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
       {/* Top Banner & Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-emerald-600 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
-            <span>Invoices Count</span>
-            <FileText className="w-4 h-4 text-emerald-600" />
-          </div>
-          <div className="font-heading font-black text-2xl text-slate-900 font-mono mt-2">
-            {filteredInvoices.length}
-          </div>
-          <div className="text-[11px] font-bold text-emerald-600 mt-1">Across {filteredInvoices.length > 0 ? 'filtered' : 'no'} bills</div>
-        </div>
-
         <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-[#2563eb] flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
             <span>Invoices Count</span>
@@ -181,6 +212,17 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
             {filteredInvoices.length}
           </div>
           <div className="text-[11px] font-bold text-[#2563eb] mt-1">Total indexed records</div>
+        </div>
+
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-red-500 flex flex-col justify-between">
+          <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
+            <span>Open Queries</span>
+            <AlertTriangle className="w-4 h-4 text-red-500" />
+          </div>
+          <div className="font-heading font-black text-2xl text-slate-900 font-mono mt-2">
+            {openQueryCount}
+          </div>
+          <div className="text-[11px] font-bold text-red-500 mt-1">{openQueryCount > 0 ? 'Need admin action' : 'All clear'}</div>
         </div>
 
         <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-purple-600 flex flex-col justify-between">
@@ -194,15 +236,21 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
           <div className="text-[11px] font-bold text-purple-600 mt-1">Across all filtered bills</div>
         </div>
 
-        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 flex flex-col justify-center gap-2.5 shadow-sm border-l-4 border-l-slate-700">
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 flex flex-col justify-center gap-2 shadow-sm border-l-4 border-l-slate-700">
           <button
-            onClick={handleExportCSV}
+            onClick={handleExportExcel}
             className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10"
           >
-            <Download className="w-4 h-4" /> Export Invoices
+            <FileSpreadsheet className="w-4 h-4" /> Export Excel
           </button>
-          <div className="text-[11px] text-center text-slate-600 font-bold">
-            Includes serial numbers
+          <button
+            onClick={handleExportCSV}
+            className="btn btn-outline w-full py-1.5 text-[11px] font-bold flex items-center justify-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5 text-slate-700" /> CSV
+          </button>
+          <div className="text-[10px] text-center text-slate-500 font-bold leading-tight">
+            Every serial, barcode, staff &amp; store
           </div>
         </div>
       </div>
@@ -325,7 +373,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
             {matchingItems.map(({ invoice, item }, idx) => (
               <div
                 key={`${invoice.id}-${idx}`}
-                onClick={() => { setSelectedInvoice(invoice); setShowDetailModal(true); }}
+                onClick={() => openInvoice(invoice)}
                 className="p-4 hover:bg-slate-50 cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition-colors"
               >
                 <div>
@@ -377,7 +425,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                 {filteredInvoices.map((inv) => (
                   <tr
                     key={inv.id}
-                    onClick={() => { setSelectedInvoice(inv); setShowQueryForm(false); setQueryNote(''); setShowDetailModal(true); }}
+                    onClick={() => openInvoice(inv)}
                     className="hover:bg-slate-50 cursor-pointer transition-colors group"
                   >
                     <td className="py-4 px-6">
@@ -403,7 +451,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                     <td className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={(e) => { e.stopPropagation(); setSelectedInvoice(inv); setShowDetailModal(true); }}
+                          onClick={(e) => { e.stopPropagation(); openInvoice(inv); }}
                           className="p-2 rounded-lg bg-slate-100 hover:bg-blue-100 text-slate-600 hover:text-[#2563eb] transition-colors shadow-sm"
                           title="View Invoice"
                         >
@@ -470,38 +518,88 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                     <div className="text-slate-500 font-medium">{selectedInvoice.customer.email}</div>
                   )}
                 </div>
+                <div className="sm:text-right space-y-1.5">
+                  <div>
+                    <span className="text-slate-400 uppercase font-black text-[10px] tracking-wider flex items-center gap-1 sm:justify-end">
+                      <User className="w-3 h-3" /> Billed By
+                    </span>
+                    <div className="font-bold text-slate-800">{selectedInvoice.billedByName || selectedInvoice.billedBy || '—'}</div>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 uppercase font-black text-[10px] tracking-wider flex items-center gap-1 sm:justify-end">
+                      <MapPin className="w-3 h-3" /> Store Location
+                    </span>
+                    <div className="font-bold text-slate-800">{selectedInvoice.locationName || selectedInvoice.locationId || '—'}</div>
+                  </div>
+                </div>
               </div>
 
-              {/* Itemized Table */}
+              {/* Itemized Table — grouped by product: identical units collapse into one row with a
+                  Qty and an expandable, ordered serial list (so 100 phones aren't 100 rows). */}
               <div className="border-2 border-slate-300 rounded-xl overflow-x-auto mt-4">
                 <table className="w-full text-left text-xs min-w-[500px]">
                   <thead className="bg-slate-50 text-slate-700 uppercase font-heading font-black text-[10px] border-b-2 border-slate-300">
                     <tr>
-                      <th className="p-3">Item</th>
-                      <th className="p-3">Serial Number</th>
-                      <th className="p-3 text-center">Qty</th>
+                      <th className="p-3">Product & Model</th>
+                      <th className="p-3">Serial Numbers</th>
+                      <th className="p-3 text-center w-16">Qty</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 font-mono">
-                    {selectedInvoice.items?.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/80">
-                        <td className="p-3 font-sans">
-                          <div className="font-black text-slate-900 text-sm">{item.name}</div>
-                          <div className="text-[11px] font-bold text-slate-500 font-mono">#{item.barcode} ({item.category || 'Electronics'})</div>
-                        </td>
-                        <td className="p-3">
-                          {item.imei ? (
-                            <span className="inline-flex items-center gap-1 font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 font-bold">
-                              <Shield className="w-3.5 h-3.5 text-[#2563eb]" />
-                              <span>{item.imei}</span>
-                            </span>
-                          ) : (
-                            <span className="text-slate-400 font-semibold italic text-[11px]">No serial recorded</span>
+                  <tbody className="divide-y divide-slate-100">
+                    {groupInvoiceItems(selectedInvoice.items).map((g) => {
+                      const expanded = expandedGroups.has(g.key);
+                      const single = g.serials.length <= 1;
+                      return (
+                        <React.Fragment key={g.key}>
+                          <tr
+                            className={`hover:bg-slate-50/80 ${single ? '' : 'cursor-pointer'}`}
+                            onClick={single ? undefined : () => toggleGroup(g.key)}
+                          >
+                            <td className="p-3">
+                              <div className="font-black text-slate-900 text-sm">{g.name}</div>
+                              <div className="text-[11px] font-bold text-slate-500 font-mono">
+                                {g.sku ? `${g.sku} • ` : ''}#{g.barcode} ({g.category})
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              {single ? (
+                                g.serials[0] ? (
+                                  <span className="inline-flex items-center gap-1 font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 font-bold">
+                                    <Shield className="w-3.5 h-3.5 text-[#2563eb]" /> {g.serials[0]}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 font-semibold italic text-[11px]">No serial recorded</span>
+                                )
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); toggleGroup(g.key); }}
+                                  className="no-print inline-flex items-center gap-1.5 font-bold text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 hover:bg-blue-100"
+                                >
+                                  <Shield className="w-3.5 h-3.5" /> {g.serials.length} serial numbers
+                                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                                </button>
+                              )}
+                            </td>
+                            <td className="p-3 text-center font-black text-slate-900 font-mono">{g.qty}</td>
+                          </tr>
+                          {!single && (
+                            <tr className={`${expanded ? '' : 'hidden'} print:!table-row bg-slate-50/60`}>
+                              <td colSpan={3} className="px-3 pb-3">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5 pt-1">
+                                  {g.serials.map((s, i) => (
+                                    <div key={i} className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-slate-700 bg-white border border-slate-200 rounded px-2 py-1">
+                                      <span className="text-slate-400 w-5 text-right">{i + 1}.</span>
+                                      <span className="truncate" title={s}>{s}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td className="p-3 text-center font-black text-slate-900">{item.qty}</td>
-                      </tr>
-                    ))}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -633,6 +731,14 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                 className="btn btn-outline font-bold py-2.5 px-5"
               >
                 Close
+              </button>
+
+              <button
+                type="button"
+                onClick={() => exportInvoicesXlsx([selectedInvoice], exportFilename('xlsx', selectedInvoice.id), exportMeta())}
+                className="btn btn-outline font-bold py-2.5 px-4"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Download Excel
               </button>
 
               <button

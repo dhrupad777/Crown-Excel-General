@@ -230,6 +230,14 @@ h1, h2, h3, h4, h5, h6 {
   color: #94a3b8;
 }
 
+/* Search / icon inputs: a leading icon is absolutely positioned inside a .relative wrapper and
+   the input carries a pl-* utility to keep its text clear of the icon. This compound selector
+   raises specificity above the base .input-field padding shorthand so the left padding always
+   wins regardless of stylesheet/utility cascade order — otherwise the icon overlaps the text. */
+.input-field.pl-8 { padding-left: 2rem; }
+.input-field.pl-10 { padding-left: 2.5rem; }
+.input-field.pl-11 { padding-left: 2.75rem; }
+
 /* Data Tables */
 .table-container {
   width: 100%;

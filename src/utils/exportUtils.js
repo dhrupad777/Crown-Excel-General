@@ -157,3 +157,98 @@ export const exportSerialsPdf = (records, filename, subtitle) => {
     rows: sorted.map((s) => serialToRow(s).slice(0, 13))
   });
 };
+
+// --- Invoice / bill export ---------------------------------------------------
+
+const ISSUING_VENDOR = 'Crown Excel Electronics';
+
+const queryStatusLabel = (inv) =>
+  !inv.query ? 'None' : inv.query.resolved ? 'Resolved' : 'Open';
+
+// Splits a stored serial/imei string into individual serials (legacy rows crammed several into
+// one field separated by / , ; — mirror findInvoiceBySerial's tolerance).
+const splitSerials = (imei) =>
+  String(imei || '').split(/[/,;]+/).map((s) => s.trim()).filter(Boolean);
+
+// One row PER SERIAL, carrying the full context a downloaded report needs.
+const INVOICE_SERIAL_HEADERS = [
+  'Invoice Number', 'Bill Created Date', 'Bill Created Time',
+  'Customer Name', 'Mobile Number', 'Email ID', 'Company',
+  'Product', 'Model / SKU', 'Barcode', 'Serial Number', 'Category',
+  'Billed By', 'Store Location', 'Query Status'
+];
+
+// One row PER INVOICE (summary).
+const INVOICE_SUMMARY_HEADERS = [
+  'Invoice Number', 'Created Date & Time', 'Customer Name', 'Mobile Number', 'Email ID',
+  'Company', 'Total Units', 'Distinct Models', 'Billed By', 'Store Location',
+  'Query Status', 'Query Note'
+];
+
+// Builds the three-sheet invoice workbook data. `meta` is shown on the Report Info sheet.
+export const buildInvoiceExportSheets = (invoices, meta = {}) => {
+  const serialRows = [];
+  const summaryRows = [];
+  let totalUnits = 0;
+
+  for (const inv of invoices) {
+    const created = inv.date ? new Date(inv.date) : null;
+    const createdDate = created ? created.toLocaleDateString() : '';
+    const createdTime = created ? created.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    const cust = inv.customer || {};
+    const billedBy = inv.billedByName || inv.billedBy || '';
+    const location = inv.locationName || inv.locationId || '';
+    const models = new Set();
+    let invUnits = 0;
+
+    for (const item of inv.items || []) {
+      const serials = splitSerials(item.imei);
+      const rowsForItem = serials.length > 0 ? serials : ['']; // still represent a unit with no serial
+      models.add(item.sku || item.name || '');
+      for (const serial of rowsForItem) {
+        invUnits += 1;
+        totalUnits += 1;
+        serialRows.push([
+          inv.id, createdDate, createdTime,
+          cust.name || '', cust.whatsapp || '', cust.email || '', cust.company || '',
+          item.name || '', item.sku || '', item.barcode || '', serial, item.category || '',
+          billedBy, location, queryStatusLabel(inv)
+        ]);
+      }
+    }
+
+    summaryRows.push([
+      inv.id,
+      created ? created.toLocaleString() : '',
+      cust.name || '', cust.whatsapp || '', cust.email || '', cust.company || '',
+      invUnits, models.size, billedBy, location,
+      queryStatusLabel(inv), inv.query?.note || ''
+    ]);
+  }
+
+  const infoRows = [
+    ['Issuing Vendor', ISSUING_VENDOR],
+    ['Report', 'Invoices & Serial Numbers Export'],
+    ['Generated At (Downloaded)', new Date().toLocaleString()],
+    ['Date Filter', meta.dateFilter || 'All records'],
+    ['Total Invoices', invoices.length],
+    ['Total Units / Serials', totalUnits]
+  ];
+
+  return {
+    serials: { name: 'Serial Details', headers: INVOICE_SERIAL_HEADERS, rows: serialRows },
+    summary: { name: 'Invoice Summary', headers: INVOICE_SUMMARY_HEADERS, rows: summaryRows },
+    info: { name: 'Report Info', headers: ['Field', 'Value'], rows: infoRows, colWidths: [28, 50] }
+  };
+};
+
+export const exportInvoicesXlsx = (invoices, filename, meta = {}) => {
+  const { serials, summary, info } = buildInvoiceExportSheets(invoices, meta);
+  exportToXlsx({ filename, sheets: [summary, serials, info] });
+};
+
+// Flat CSV fallback (one row per serial — same columns as the Serial Details sheet).
+export const exportInvoicesCsv = (invoices, filename, meta = {}) => {
+  const { serials } = buildInvoiceExportSheets(invoices, meta);
+  exportToCsv({ filename, headers: serials.headers, rows: serials.rows });
+};
