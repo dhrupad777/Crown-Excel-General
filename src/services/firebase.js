@@ -1,17 +1,27 @@
 import { initializeApp } from 'firebase/app';
 import { getAnalytics } from 'firebase/analytics';
-import { 
-  getFirestore, 
-  initializeFirestore, 
-  persistentLocalCache, 
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
   persistentMultipleTabManager,
   collection,
   doc,
   setDoc,
   deleteDoc,
+  getDoc,
   getDocs,
-  onSnapshot
+  onSnapshot,
+  runTransaction,
+  query,
+  orderBy,
+  limit,
+  getCountFromServer,
+  serverTimestamp
 } from 'firebase/firestore';
+
+// Re-exported so the rest of the app never imports firebase/firestore directly.
+export { serverTimestamp };
 
 // Crown Excel Electronics - Live Production Firebase Configuration
 const defaultFirebaseConfig = {
@@ -163,6 +173,86 @@ class FirebaseService {
       console.warn(`Failed to fetch collection [${collectionName}]:`, err.message);
       return null;
     }
+  }
+
+  async getDocOnce(collectionName, id) {
+    if (!this.isInitialized || !this.db) {
+      return { exists: false, data: null, error: 'not-initialized' };
+    }
+    try {
+      const snap = await getDoc(doc(this.db, collectionName, id));
+      return {
+        exists: snap.exists(),
+        data: snap.exists() ? { ...snap.data(), id: snap.id } : null
+      };
+    } catch (err) {
+      return { exists: false, data: null, error: err.code || err.message };
+    }
+  }
+
+  // Atomically creates a document only if it does not exist yet — the client half of the
+  // duplicate-serial guarantee (security rules are the server half). Transactions always read
+  // from the server, never the cache, so this also cleanly refuses to run offline instead of
+  // queueing a write that could lose a conflict hours later.
+  async createIfAbsent(collectionName, id, data) {
+    if (!this.isInitialized || !this.db) return { ok: false, error: 'not-initialized' };
+    try {
+      return await runTransaction(this.db, async (tx) => {
+        const ref = doc(this.db, collectionName, id);
+        const snap = await tx.get(ref);
+        if (snap.exists()) {
+          return { ok: false, exists: true, existing: { ...snap.data(), id: snap.id } };
+        }
+        tx.set(ref, data);
+        return { ok: true };
+      });
+    } catch (err) {
+      return { ok: false, error: err.code || err.message };
+    }
+  }
+
+  // Like saveToCloud but AWAITS and THROWS on failure. Use for writes where the cloud is the
+  // source of truth (serial edits, staff, locations) and the caller must surface the error —
+  // saveToCloud's silent-swallow behavior is only appropriate for background mirroring.
+  async updateDocStrict(collectionName, id, data) {
+    if (!this.isInitialized || !this.db) {
+      throw new Error('Cloud database is not connected.');
+    }
+    await setDoc(doc(this.db, collectionName, id), data, { merge: true });
+  }
+
+  async fetchCollectionOrdered(collectionName, { orderByField = 'createdAt', direction = 'desc', max = 200 } = {}) {
+    if (!this.isInitialized || !this.db) return [];
+    try {
+      const q = query(collection(this.db, collectionName), orderBy(orderByField, direction), limit(max));
+      const snapshot = await getDocs(q);
+      const items = [];
+      snapshot.forEach((docSnap) => {
+        items.push({ ...docSnap.data(), id: docSnap.id });
+      });
+      return items;
+    } catch (err) {
+      console.warn(`Failed to fetch ordered collection [${collectionName}]:`, err.message);
+      return [];
+    }
+  }
+
+  async getCollectionCount(collectionName) {
+    if (!this.isInitialized || !this.db) return null;
+    try {
+      const snap = await getCountFromServer(collection(this.db, collectionName));
+      return snap.data().count;
+    } catch (err) {
+      console.warn(`Failed to count collection [${collectionName}]:`, err.message);
+      return null;
+    }
+  }
+
+  unsubscribeAll() {
+    Object.values(this.listeners).forEach((unsub) => {
+      try { unsub(); } catch { /* already torn down */ }
+    });
+    this.listeners = {};
   }
 }
 

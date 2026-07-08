@@ -1,28 +1,31 @@
 import React, { useState } from 'react';
-import { 
-  Database, 
-  RefreshCw, 
-  Download, 
-  Upload, 
-  ShieldCheck, 
-  Wifi, 
-  CheckCircle2, 
-  AlertTriangle,
-  HelpCircle,
-  FileText,
+import {
+  Database,
+  RefreshCw,
+  Download,
+  Upload,
+  ShieldCheck,
+  CheckCircle2,
   Key,
   Cloud
 } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { Modal } from './components/Modal';
+import { AuthGate } from './components/AuthGate';
 import { BillingDesk } from './pages/BillingDesk';
 import { InvoicesArchive } from './pages/InvoicesArchive';
 import { ProductsManager } from './pages/ProductsManager';
 import { CustomersManager } from './pages/CustomersManager';
+import { SerialCapture } from './pages/SerialCapture';
+import { SerialRegistry } from './pages/SerialRegistry';
+import { RegistrationsDashboard } from './pages/RegistrationsDashboard';
+import { AdminPage } from './pages/AdminPage';
 import { storageService } from './services/storage';
 import { firebaseService } from './services/firebase';
+import { useAuth } from './context/AuthContext';
 
 export function App() {
+  const { isAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState('billing');
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
   
@@ -51,9 +54,13 @@ export function App() {
   // Handle Reset to Demo Data
   const handleResetDemo = () => {
     if (window.confirm("WARNING: This will replace all current data with the initial Crown Excel General demo database. Continue?")) {
-      storageService.resetToDemoData();
-      alert("Database reset to demo state successfully!");
-      window.location.reload();
+      const success = storageService.resetToDemoData();
+      if (success) {
+        alert("Database reset to demo state successfully!");
+        window.location.reload();
+      } else {
+        alert("Reset failed: could not write to local storage (device storage may be full).");
+      }
     }
   };
 
@@ -84,17 +91,24 @@ export function App() {
     }
   };
 
+  // Safety net alongside the role-aware Navbar: a non-admin can never land on the Admin tab
+  // (e.g. after being demoted mid-session while the tab is open).
+  if (activeTab === 'admin' && !isAdmin) {
+    setActiveTab('billing');
+  }
+
   return (
+    <AuthGate>
     <div className="min-h-screen flex flex-col bg-[#f7f9fb] text-slate-900 font-body">
-      
+
       {/* Sidebar & Top Navigation */}
-      <Navbar 
-        activeTab={activeTab} 
+      <Navbar
+        activeTab={activeTab}
         setActiveTab={(tab) => {
           setActiveTab(tab);
           if (tab !== 'invoices') setSelectedInvoiceId(null);
-        }} 
-        onOpenSettings={() => setShowSettings(true)} 
+        }}
+        onOpenSettings={() => setShowSettings(true)}
       />
 
       {/* Main Content Area (Offset by 280px on desktop for Left Sidebar) */}
@@ -110,6 +124,18 @@ export function App() {
         )}
         {activeTab === 'customers' && (
           <CustomersManager />
+        )}
+        {activeTab === 'serials' && (
+          <SerialCapture />
+        )}
+        {activeTab === 'registry' && (
+          <SerialRegistry />
+        )}
+        {activeTab === 'dashboard' && (
+          <RegistrationsDashboard />
+        )}
+        {activeTab === 'admin' && isAdmin && (
+          <AdminPage />
         )}
       </main>
 
@@ -143,54 +169,54 @@ export function App() {
         <div className="space-y-6">
           
           {/* Section 1: Firebase Cloud Configuration */}
-          <div className="p-5 rounded-2xl bg-slate-900/90 border border-white/10 space-y-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+          <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
-                <Cloud className="w-5 h-5 text-cyan-400" />
-                <h4 className="font-heading font-bold text-sm text-white uppercase tracking-wider">
+                <Cloud className="w-5 h-5 text-[#2563eb]" />
+                <h4 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">
                   Firebase Console Cloud Synchronization
                 </h4>
               </div>
-              <span className="badge badge-info text-[10px]">Dual-Mode Engine</span>
+              <span className="bg-blue-50 text-[#2563eb] border border-blue-200 font-bold px-2.5 py-0.5 rounded text-[10px] uppercase">Dual-Mode Engine</span>
             </div>
 
-            <p className="text-xs text-slate-300">
+            <p className="text-xs font-semibold text-slate-600">
               The app currently runs in <b>High-Speed Local IndexedDB Mode</b> with zero latency. When you are ready to link your Firebase Console project for cloud backup across devices, paste your API config below:
             </p>
 
             <form onSubmit={handleSaveFirebaseConfig} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">API Key</label>
+                  <label className="text-[11px] font-black text-slate-700 uppercase block mb-1">API Key</label>
                   <input
                     type="text"
                     value={firebaseConfig?.apiKey || ''}
                     onChange={(e) => setFirebaseConfig({ ...firebaseConfig, apiKey: e.target.value })}
-                    className="input-field text-xs font-mono py-2"
+                    className="input-field text-xs font-mono py-2 bg-white border-slate-300 font-bold text-slate-900"
                     placeholder="AIzaSy..."
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Project ID</label>
+                  <label className="text-[11px] font-black text-slate-700 uppercase block mb-1">Project ID</label>
                   <input
                     type="text"
                     value={firebaseConfig?.projectId || ''}
                     onChange={(e) => setFirebaseConfig({ ...firebaseConfig, projectId: e.target.value })}
-                    className="input-field text-xs font-mono py-2 text-cyan-400"
+                    className="input-field text-xs font-mono py-2 font-bold text-[#2563eb] bg-white border-slate-300"
                     placeholder="crown-excel-general"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-2">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 pt-2">
                 {configSaved ? (
-                  <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
+                  <span className="text-xs text-emerald-600 font-bold flex items-center gap-1">
                     <CheckCircle2 className="w-4 h-4" /> Firebase configuration updated!
                   </span>
                 ) : (
-                  <span className="text-[11px] text-slate-500">Offline persistence is enabled automatically.</span>
+                  <span className="text-[11px] font-bold text-slate-500">Offline persistence is enabled automatically.</span>
                 )}
-                <button type="submit" className="btn btn-secondary py-1.5 text-xs">
+                <button type="submit" className="btn btn-secondary py-2 text-xs self-end sm:self-center font-bold">
                   <Key className="w-3.5 h-3.5" /> Save Firebase Keys
                 </button>
               </div>
@@ -198,56 +224,61 @@ export function App() {
           </div>
 
           {/* Section 2: Data Backup & Restore */}
-          <div className="p-5 rounded-2xl bg-slate-900/90 border border-white/10 space-y-4">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+          <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
-                <Database className="w-5 h-5 text-emerald-400" />
-                <h4 className="font-heading font-bold text-sm text-white uppercase tracking-wider">
+                <Database className="w-5 h-5 text-emerald-600" />
+                <h4 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">
                   Local Database Management & Backup
                 </h4>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <button
                 type="button"
                 onClick={handleExportJSON}
-                className="btn btn-outline py-2.5 text-xs flex items-center justify-center gap-1.5"
+                className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
               >
-                <Download className="w-4 h-4 text-emerald-400" /> Export Full Backup (JSON)
+                <Download className="w-4 h-4 text-emerald-600" /> Export Full Backup (JSON)
               </button>
-              <button
-                type="button"
-                onClick={handleResetDemo}
-                className="btn btn-outline text-amber-400 border-amber-500/30 hover:bg-amber-500/10 py-2.5 text-xs flex items-center justify-center gap-1.5"
-              >
-                <RefreshCw className="w-4 h-4" /> Reset to Demo Database
-              </button>
-            </div>
-
-            {/* Import Box */}
-            <div className="pt-3 border-t border-white/5 space-y-2">
-              <label className="text-[10px] font-bold text-slate-400 uppercase block">
-                Restore from JSON Backup
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={importText}
-                  onChange={(e) => setImportText(e.target.value)}
-                  placeholder="Paste JSON backup string here..."
-                  className="input-field text-xs font-mono py-1.5 flex-1 bg-slate-950"
-                />
+              {isAdmin && (
                 <button
                   type="button"
-                  onClick={handleImportJSON}
-                  disabled={!importText.trim()}
-                  className="btn btn-primary py-1.5 px-3 text-xs"
+                  onClick={handleResetDemo}
+                  className="btn btn-outline text-amber-600 border-amber-300 hover:bg-amber-50 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
                 >
-                  <Upload className="w-3.5 h-3.5" /> Restore
+                  <RefreshCw className="w-4 h-4" /> Reset to Demo Database
                 </button>
-              </div>
+              )}
             </div>
+
+            {/* Import Box (admin only — restores products/customers/invoices; the serial
+                registry is create-only in the cloud and is never restored from backups) */}
+            {isAdmin && (
+              <div className="pt-3 border-t border-slate-100 space-y-2">
+                <label className="text-[11px] font-black text-slate-700 uppercase block">
+                  Restore from JSON Backup
+                </label>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={importText}
+                    onChange={(e) => setImportText(e.target.value)}
+                    placeholder="Paste JSON backup string here..."
+                    className="input-field text-xs font-mono py-2 flex-1 bg-white border-slate-300 font-medium"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleImportJSON}
+                    disabled={!importText.trim()}
+                    className="btn btn-primary py-2 px-4 text-xs font-bold whitespace-nowrap"
+                  >
+                    <Upload className="w-3.5 h-3.5" /> Restore Data
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Close Button */}
@@ -255,7 +286,7 @@ export function App() {
             <button
               type="button"
               onClick={() => setShowSettings(false)}
-              className="btn btn-primary"
+              className="btn btn-primary font-bold px-6 py-2.5"
             >
               Close Settings
             </button>
@@ -265,6 +296,7 @@ export function App() {
       </Modal>
 
     </div>
+    </AuthGate>
   );
 }
 export default App;

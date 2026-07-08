@@ -1,0 +1,130 @@
+rules_version = '2';
+
+// Crown Excel General — Firestore security rules.
+// Source of truth lives in this repo; publish via Firebase Console → Firestore → Rules.
+// PUBLISH ONLY AFTER the authenticated build is deployed and login is verified — these rules
+// cut off every unauthenticated client the moment they go live.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Helpers ----------
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
+    }
+    function callerEmail() { return request.auth.token.email.lower(); }
+    function staffPath() {
+      return /databases/$(database)/documents/staff/$(callerEmail());
+    }
+    function isBootstrapAdmin() {
+      return signedIn()
+        && callerEmail() in ['dhrupadrajpurohit@gmail.com', 'vishal@crownexcel.ae', 'vishalcrownexcel@gmail.com', 'qaistime@gmail.com'];
+    }
+    function isStaff() {
+      return isBootstrapAdmin() || (signedIn() && exists(staffPath())
+        && get(staffPath()).data.active == true);
+    }
+    function isAdmin() {
+      return isBootstrapAdmin() || (signedIn() && exists(staffPath())
+        && get(staffPath()).data.role == 'admin' && get(staffPath()).data.active == true);
+    }
+
+    // ---------- Staff allowlist (doc id = lowercase email) ----------
+    match /staff/{email} {
+      // Any signed-in account may read its OWN doc (to learn it is unauthorized);
+      // staff may read/list all (user filter dropdowns, admin panel).
+      allow get: if isStaff() || (signedIn() && callerEmail() == email);
+      allow list: if isStaff();
+      // Admins manage staff
+      allow create: if isAdmin()
+                        && email == email.lower()
+                        && request.resource.data.role in ['admin', 'standard'];
+      allow update: if isAdmin()
+                        && request.resource.data.role in ['admin', 'standard'];
+      allow delete: if false;   // deactivate via active:false — never delete
+    }
+
+    // ---------- Locations ----------
+    match /locations/{locId} {
+      allow read: if isStaff();
+      allow create, update: if isAdmin();
+      allow delete: if false;   // deactivate via active:false
+    }
+
+    // ---------- Serial registrations (doc id = normalized UPPERCASE serial) ----------
+    // CREATE-ONLY semantics are the duplicate-serial guarantee: writing over an existing doc
+    // is an UPDATE, which only an admin can do, only within 24h, and never touching the
+    // identity fields. An existing serial can therefore never be silently replaced.
+    match /serials/{serial} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && serial == serial.upper()
+        && request.resource.data.serial == serial
+        && request.resource.data.createdBy == callerEmail()
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.productName is string
+        && request.resource.data.productName.size() > 0
+        && request.resource.data.customer.name is string
+        && request.resource.data.customer.name.size() > 0
+        && request.resource.data.locationId is string;
+      // Admin correction window: 24 hours from creation; identity fields immutable.
+      allow update: if isAdmin()
+        && request.time < resource.data.createdAt + duration.value(24, 'h')
+        && request.resource.data.serial == resource.data.serial
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.updatedBy == callerEmail()
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // ---------- Audit trail (append-only; admins read) ----------
+    match /auditLog/{entryId} {
+      allow read: if isAdmin();
+      allow create: if isStaff()
+        && request.resource.data.createdBy == callerEmail()
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---------- Duplicate-entry attempts (append-only; staff read for dashboard) ----------
+    match /duplicateAttempts/{attemptId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.createdBy == callerEmail()
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---------- Existing business collections ----------
+    // Standard staff may ADD products/customers (a new record) but never edit or delete them
+    // (requirement 8A). Editing/deleting is admin-only.
+    match /products/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff();
+      allow update, delete: if isAdmin();
+    }
+    match /customers/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff();
+      allow delete: if isAdmin();
+      // Admin edits freely; standard staff may only bump ordersCount/totalSpent on invoice commit.
+      allow update: if isAdmin()
+        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ordersCount', 'totalSpent']));
+    }
+    match /invoices/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff();
+      allow delete: if isAdmin();
+      // Standard staff can only update/add query details to raise concerns
+      allow update: if isAdmin()
+        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query']));
+    }
+
+    // ---------- Default deny ----------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

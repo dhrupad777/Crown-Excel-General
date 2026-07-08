@@ -1,26 +1,37 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Package, 
-  Search, 
-  Plus, 
-  Trash2, 
-  Edit3, 
-  Download, 
-  Barcode, 
-  Check, 
+import {
+  Package,
+  Search,
+  Plus,
+  Trash2,
+  Edit3,
+  Download,
+  Barcode,
+  Check,
   Tag,
   Smartphone,
   Laptop,
   Headphones,
-  Shield
+  AlertCircle,
+  FileSpreadsheet,
+  FileText,
+  Upload,
+  Layers
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
+import { ImportExcelModal } from '../components/ImportExcelModal';
+import { guessProductDefaults } from '../utils/productDefaults';
+import { importProducts, PRODUCT_TEMPLATE_HEADERS } from '../utils/importUtils';
+import { exportToCsv, exportToXlsx, exportToPdf, formatLocalDate } from '../utils/exportUtils';
+import { useAuth } from '../context/AuthContext';
 
 export const ProductsManager = () => {
+  const { isAdmin } = useAuth();
   const [products, setProducts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
+  const [showImportModal, setShowImportModal] = useState(false);
 
   // Modal state
   const [showModal, setShowModal] = useState(false);
@@ -28,12 +39,13 @@ export const ProductsManager = () => {
   const [formData, setFormData] = useState({
     barcode: '',
     name: '',
+    sku: '',
     category: 'Mobile Phones',
-    price: '',
-    stock: '50',
-    unit: 'Unit',
-    imeiRequired: true
+    unit: 'Box'
   });
+
+  // Tracks manual overrides so auto-detect (new products only) doesn't clobber an explicit choice
+  const [categoryTouched, setCategoryTouched] = useState(false);
 
   const loadProducts = () => {
     setProducts(storageService.getProducts());
@@ -56,6 +68,7 @@ export const ProductsManager = () => {
       return (
         p.name?.toLowerCase().includes(q) ||
         p.barcode?.toLowerCase().includes(q) ||
+        p.sku?.toLowerCase().includes(q) ||
         p.category?.toLowerCase().includes(q)
       );
     }
@@ -67,14 +80,16 @@ export const ProductsManager = () => {
   // Handle Save
   const handleSaveProduct = (e) => {
     e.preventDefault();
-    if (!formData.name || !formData.price) return;
+    if (!formData.name) return;
+
+    if (storageService.isBarcodeInUse(formData.barcode, editingProduct?.id)) {
+      alert(`Barcode ${formData.barcode} is already assigned to another device in the catalog. Please use a unique barcode.`);
+      return;
+    }
 
     storageService.saveProduct({
       ...formData,
-      id: editingProduct ? editingProduct.id : undefined,
-      price: Number(formData.price),
-      stock: Number(formData.stock),
-      imeiRequired: Boolean(formData.imeiRequired)
+      id: editingProduct ? editingProduct.id : undefined
     });
 
     loadProducts();
@@ -96,12 +111,12 @@ export const ProductsManager = () => {
     setFormData({
       barcode: prod.barcode || '',
       name: prod.name || '',
+      sku: prod.sku || '',
       category: prod.category || 'Mobile Phones',
-      price: prod.price?.toString() || '0',
-      stock: prod.stock?.toString() || '0',
-      unit: prod.unit || 'Unit',
-      imeiRequired: prod.imeiRequired ?? true
+      unit: prod.unit || 'Box'
     });
+    // Editing an existing, already-correctly-categorized product should never be auto-reclassified
+    setCategoryTouched(true);
     setShowModal(true);
   };
 
@@ -111,82 +126,120 @@ export const ProductsManager = () => {
     setFormData({
       barcode: Math.floor(1000000 + Math.random() * 9000000).toString(),
       name: '',
+      sku: '',
       category: 'Mobile Phones',
-      price: '',
-      stock: '50',
-      unit: 'Unit',
-      imeiRequired: true
+      unit: 'Box'
     });
+    setCategoryTouched(false);
     setShowModal(true);
   };
 
-  // Export CSV
-  const handleExportCSV = () => {
-    if (products.length === 0) return;
-    const headers = ["ID", "Barcode", "Device Name", "Category", "Unit Price ($)", "Stock Qty", "Unit Type", "IMEI Required"];
-    const rows = products.map(p => [
-      p.id,
-      `"${p.barcode}"`,
-      `"${p.name}"`,
-      `"${p.category}"`,
-      p.price?.toFixed(2) || '0.00',
-      p.stock || 0,
-      `"${p.unit || 'Unit'}"`,
-      p.imeiRequired ? "YES" : "NO"
-    ]);
+  const exportHeaders = ["ID", "Barcode", "Device Name", "Model / SKU", "Category", "Unit Type"];
+  const exportRows = () => products.map(p => [
+    p.id,
+    p.barcode,
+    p.name,
+    p.sku || '',
+    p.category,
+    p.unit || 'Box'
+  ]);
 
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `Crown_Excel_Electronics_Catalog_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleExport = (kind) => {
+    if (products.length === 0) return;
+    const base = `Crown_Excel_Electronics_Catalog_${formatLocalDate(new Date())}`;
+    if (kind === 'csv') exportToCsv({ filename: `${base}.csv`, headers: exportHeaders, rows: exportRows() });
+    if (kind === 'xlsx') exportToXlsx({ filename: `${base}.xlsx`, sheets: [{ name: 'Products', headers: exportHeaders, rows: exportRows() }] });
+    if (kind === 'pdf') exportToPdf({
+      filename: `${base}.pdf`,
+      title: 'Crown Excel — Product Master',
+      subtitle: `Exported ${new Date().toLocaleString()} • ${products.length} devices`,
+      headers: exportHeaders,
+      rows: exportRows()
+    });
+  };
+
+  const handleImport = async (rows, options) => {
+    const result = await importProducts(rows, options);
+    storageService.appendAudit('import.products', null, {
+      created: result.created, updated: result.updated, skipped: result.skipped, errors: result.errors.length
+    }, { entity: 'products', entityId: 'bulk-import' });
+    loadProducts();
+    return result;
   };
 
   const getCategoryIcon = (category) => {
     switch (category) {
-      case 'Laptops': return <Laptop className="w-3.5 h-3.5 text-cyan-400" />;
-      case 'Mobile Phones': return <Smartphone className="w-3.5 h-3.5 text-emerald-400" />;
-      case 'Audio & Wearables': return <Headphones className="w-3.5 h-3.5 text-purple-400" />;
-      default: return <Tag className="w-3.5 h-3.5 text-amber-400" />;
+      case 'Laptops': return <Laptop className="w-3.5 h-3.5 text-[#2563eb]" />;
+      case 'Mobile Phones': return <Smartphone className="w-3.5 h-3.5 text-emerald-600" />;
+      case 'Audio & Wearables': return <Headphones className="w-3.5 h-3.5 text-purple-600" />;
+      default: return <Tag className="w-3.5 h-3.5 text-amber-600" />;
     }
   };
 
+  // Derived (not tracked): "Add New Device" always opens this modal blank, with no chance to
+  // have already searched the catalog first — so re-check against the database on every
+  // keystroke instead of assuming a duplicate name would've been caught elsewhere.
+  const productNameQuery = formData.name.trim().toLowerCase();
+  const similarExistingProducts = (showModal && !editingProduct && productNameQuery.length >= 3)
+    ? products.filter((p) => p.name.toLowerCase().includes(productNameQuery)).slice(0, 5)
+    : [];
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 font-body">
       
       {/* Header & Actions */}
-      <div className="glass-panel p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-purple-500">
+      <div className="bg-white border-2 border-slate-300 rounded-2xl p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm border-l-4 border-l-[#2563eb]">
         <div className="flex items-center gap-4">
-          <div className="p-3.5 rounded-2xl bg-purple-500/15 text-purple-400 border border-purple-500/30 shadow-md">
+          <div className="p-3.5 rounded-2xl bg-[#2563eb]/10 text-[#2563eb] border border-[#2563eb]/20 shadow-sm font-bold">
             <Package className="w-7 h-7 animate-pulse" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="font-heading font-black text-2xl text-white tracking-tight">
+              <h2 className="font-heading font-black text-2xl text-slate-900 tracking-tight">
                 Electronics & Devices Database
               </h2>
-              <span className="badge badge-purple text-[10px]">IMEI READY</span>
+              <span className="bg-blue-100 text-[#2563eb] font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">SERIAL TRACKED</span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Manage barcodes, stock levels, and IMEI warranty tracking for laptops, mobile phones, and gadgets.
+            <p className="text-xs font-semibold text-slate-600 mt-0.5">
+              Manage barcodes and mandatory serial/IMEI warranty tracking for laptops, mobile phones, and gadgets.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3 w-full sm:w-auto">
+        <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
+          {isAdmin && (
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+              title="Bulk import the product master from Excel"
+            >
+              <Upload className="w-4 h-4 text-slate-700" /> Import Excel
+            </button>
+          )}
           <button
-            onClick={handleExportCSV}
-            className="btn btn-outline text-xs py-2.5 flex-1 sm:flex-initial"
-            title="Export electronics catalog to spreadsheet"
+            onClick={() => handleExport('xlsx')}
+            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+            title="Export catalog as Excel workbook"
           >
-            <Download className="w-4 h-4" /> Export CSV
+            <FileSpreadsheet className="w-4 h-4 text-slate-700" /> Excel
+          </button>
+          <button
+            onClick={() => handleExport('csv')}
+            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+            title="Export catalog as CSV"
+          >
+            <Download className="w-4 h-4 text-slate-700" /> CSV
+          </button>
+          <button
+            onClick={() => handleExport('pdf')}
+            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+            title="Export catalog as PDF"
+          >
+            <FileText className="w-4 h-4 text-slate-700" /> PDF
           </button>
           <button
             onClick={handleCreateNew}
-            className="btn btn-primary text-xs py-2.5 flex-1 sm:flex-initial shadow-lg shadow-emerald-500/20"
+            className="btn btn-primary text-xs py-2.5 px-5 font-bold flex-1 sm:flex-initial shadow-md shadow-blue-500/20"
           >
             <Plus className="w-4 h-4" /> Add New Device
           </button>
@@ -194,131 +247,115 @@ export const ProductsManager = () => {
       </div>
 
       {/* Search & Category Filter */}
-      <div className="glass-panel p-5 space-y-4">
-        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="relative w-full md:w-96">
-            <Search className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+      <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 space-y-4 shadow-sm">
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
+          <div className="relative w-full lg:w-96">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search devices by Model, Barcode, or Category..."
-              className="input-field pl-10 pr-4 py-2.5 text-sm bg-slate-900 border-purple-500/30 focus:border-purple-500"
+              className="input-field pl-10 pr-16 py-3 text-sm bg-white border-slate-400 focus:border-[#2563eb] font-bold text-slate-900 w-full rounded-xl shadow-inner"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white"
+                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 hover:text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg"
               >
                 Clear
               </button>
             )}
           </div>
 
-          {/* Category Tabs */}
-          <div className="flex items-center gap-1 bg-slate-900 p-1.5 rounded-2xl border border-white/10 w-full md:w-auto overflow-x-auto shadow-inner">
-            {categories.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setSelectedCategory(cat)}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-heading font-semibold transition-all whitespace-nowrap ${
-                  selectedCategory === cat 
-                    ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/30 scale-105' 
-                    : 'text-slate-400 hover:text-white hover:bg-white/5'
-                }`}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative">
+              <Layers className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="input-field pl-8 pr-8 py-2 text-xs font-bold text-slate-800 bg-white border-slate-300 rounded-lg"
               >
-                {cat}
-              </button>
-            ))}
+                {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+              </select>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-white/5">
-          <span>⚡ High-Speed Electronics Lookup Engine Active</span>
-          <span>Showing <b>{filteredProducts.length}</b> of <b>{products.length}</b> total devices</span>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs font-bold text-slate-500 pt-3 border-t-2 border-slate-200 gap-2">
+          <span className="flex items-center gap-1.5 text-[#2563eb]">
+            <Check className="w-4 h-4" /> High-Speed Electronics Lookup Engine Active
+          </span>
+          <span>Showing <b className="text-slate-900">{filteredProducts.length}</b> of <b className="text-slate-900">{products.length}</b> total devices</span>
         </div>
       </div>
 
       {/* Products Table */}
-      <div className="glass-panel overflow-hidden">
+      <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden shadow-sm">
         {filteredProducts.length === 0 ? (
           <div className="p-16 text-center text-slate-500 space-y-3">
-            <Package className="w-12 h-12 mx-auto text-slate-600 animate-pulse" />
-            <div className="font-heading font-semibold text-slate-300 text-base">No electronics found</div>
-            <p className="text-xs max-w-md mx-auto">
+            <Package className="w-12 h-12 mx-auto text-slate-400 animate-pulse" />
+            <div className="font-heading font-black text-slate-800 text-lg">No electronics found</div>
+            <p className="text-xs font-semibold max-w-md mx-auto text-slate-500">
               No devices match your search or category filter. Click "Add New Device" above to register one.
             </p>
           </div>
         ) : (
-          <div className="table-container border-0 rounded-none">
-            <table className="table-modern">
+          <div className="table-container border-0 rounded-none w-full overflow-x-auto">
+            <table className="data-table w-full min-w-[700px]">
               <thead>
                 <tr>
-                  <th className="w-32">Barcode</th>
-                  <th>Device Model & Specs</th>
-                  <th className="text-center">IMEI / Warranty</th>
-                  <th className="text-right">Unit Price</th>
-                  <th className="text-center">Stock Level</th>
-                  <th className="text-right">Actions</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider w-36">Barcode</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Device Model & Specs</th>
+                  {isAdmin && <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>}
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-slate-100">
                 {filteredProducts.map((prod) => (
-                  <tr key={prod.id} className="hover:bg-slate-800/60 transition-colors group">
-                    <td>
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-white/10 font-mono text-xs text-purple-400 font-bold group-hover:scale-105 transition-transform">
-                        <Barcode className="w-3.5 h-3.5 text-slate-400" />
+                  <tr key={prod.id} className="hover:bg-slate-50 transition-colors group">
+                    <td className="py-4 px-6">
+                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 border border-blue-200 font-mono text-xs text-[#2563eb] font-bold shadow-sm">
+                        <Barcode className="w-3.5 h-3.5 text-[#2563eb]" />
                         <span>{prod.barcode}</span>
                       </div>
                     </td>
-                    <td>
-                      <div className="font-heading font-bold text-white text-sm">{prod.name}</div>
-                      <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-1">
-                        <span className="flex items-center gap-1 text-slate-300">
+                    <td className="py-4 px-6">
+                      <div className="font-heading font-black text-slate-900 text-sm">{prod.name}</div>
+                      <div className="text-[11px] font-bold text-slate-500 flex items-center gap-2 mt-1 flex-wrap">
+                        {prod.sku && (
+                          <>
+                            <span className="font-mono text-[#2563eb] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">{prod.sku}</span>
+                            <span>•</span>
+                          </>
+                        )}
+                        <span className="flex items-center gap-1 text-slate-700">
                           {getCategoryIcon(prod.category)}
                           <span>{prod.category}</span>
                         </span>
                         <span>•</span>
-                        <span>Unit: {prod.unit || 'Unit'}</span>
+                        <span>Unit: {prod.unit || 'Box'}</span>
                       </div>
                     </td>
-                    <td className="text-center">
-                      {prod.imeiRequired ? (
-                        <span className="badge badge-info text-[10px] px-2 py-0.5 shadow-sm">
-                          <Shield className="w-3 h-3" /> IMEI REQUIRED
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-500 italic">Optional</span>
-                      )}
-                    </td>
-                    <td className="text-right font-mono font-black text-emerald-400 text-base">
-                      ${Number(prod.price).toFixed(2)}
-                    </td>
-                    <td className="text-center">
-                      <span className={`badge ${
-                        prod.stock > 20 ? 'badge-success' : prod.stock > 5 ? 'badge-warning' : 'badge-danger'
-                      } font-mono text-xs shadow-sm`}>
-                        {prod.stock} in stock
-                      </span>
-                    </td>
-                    <td className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          onClick={() => handleEdit(prod)}
-                          className="p-2 rounded-lg bg-slate-800 hover:bg-purple-500/20 text-slate-300 hover:text-purple-400 transition-colors shadow-sm"
-                          title="Edit Device"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(prod.id, prod.name)}
-                          className="p-2 rounded-lg bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors shadow-sm"
-                          title="Delete Device"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
+                    {isAdmin && (
+                      <td className="py-4 px-6 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => handleEdit(prod)}
+                            className="p-2 rounded-lg bg-slate-100 hover:bg-blue-100 text-slate-600 hover:text-[#2563eb] transition-colors shadow-sm"
+                            title="Edit Device"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(prod.id, prod.name)}
+                            className="p-2 rounded-lg bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 transition-colors shadow-sm"
+                            title="Delete Device (admin only)"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -335,25 +372,33 @@ export const ProductsManager = () => {
         subtitle="Barcodes will be automatically matched during WhatsApp invoice billing."
         icon={Package}
       >
-        <form onSubmit={handleSaveProduct} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+        <form onSubmit={handleSaveProduct} className="space-y-4 font-body">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="form-group mb-0">
-              <label className="form-label">Barcode Number</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Barcode Number</label>
               <input
                 type="text"
                 value={formData.barcode}
                 onChange={(e) => setFormData({ ...formData, barcode: e.target.value })}
-                className="input-field font-mono font-bold text-purple-400"
+                className="input-field font-mono font-bold text-[#2563eb] bg-white border-slate-300 py-2.5"
                 placeholder="e.g. 8801001"
                 required
               />
             </div>
             <div className="form-group mb-0">
-              <label className="form-label">Category</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">
+                Category
+                {!editingProduct && !categoryTouched && formData.name.trim() && (
+                  <span className="text-[9px] normal-case font-bold text-emerald-600 ml-1.5">(auto-detected)</span>
+                )}
+              </label>
               <select
                 value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="input-field font-semibold"
+                onChange={(e) => {
+                  setCategoryTouched(true);
+                  setFormData({ ...formData, category: e.target.value });
+                }}
+                className="input-field font-bold text-slate-800 bg-white border-slate-300 py-2.5"
               >
                 <option value="Laptops">Laptops</option>
                 <option value="Mobile Phones">Mobile Phones</option>
@@ -368,92 +413,99 @@ export const ProductsManager = () => {
           </div>
 
           <div className="form-group mb-0">
-            <label className="form-label">Device Model Name & Specs</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Device Model Name & Specs</label>
             <input
               type="text"
               value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              onChange={(e) => {
+                const name = e.target.value;
+                const guess = (!editingProduct && !categoryTouched) ? guessProductDefaults(name) : null;
+                setFormData((prev) => ({
+                  ...prev,
+                  name,
+                  category: (!categoryTouched && guess) ? guess.category : prev.category
+                }));
+              }}
               placeholder="e.g. MacBook Pro 16-inch M3 Max (36GB RAM, 1TB SSD - Space Black)"
-              className="input-field font-semibold"
+              className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
               autoFocus
               required
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div className="form-group mb-0">
-              <label className="form-label">Unit Price ($)</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={formData.price}
-                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                placeholder="0.00"
-                className="input-field font-mono font-bold text-emerald-400"
-                required
-              />
-            </div>
-            <div className="form-group mb-0">
-              <label className="form-label">Stock Quantity</label>
-              <input
-                type="number"
-                min="0"
-                value={formData.stock}
-                onChange={(e) => setFormData({ ...formData, stock: e.target.value })}
-                className="input-field font-mono"
-                required
-              />
-            </div>
-            <div className="form-group mb-0">
-              <label className="form-label">Unit Type</label>
-              <select
-                value={formData.unit}
-                onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
-                className="input-field"
-              >
-                <option value="Unit">Unit</option>
-                <option value="Piece">Piece</option>
-                <option value="Pair">Pair</option>
-                <option value="Box">Box</option>
-              </select>
-            </div>
-          </div>
-
-          {/* IMEI Requirement Checkbox */}
-          <div className="p-3.5 rounded-xl bg-slate-900 border border-white/10 flex items-center justify-between mt-2">
-            <div className="flex items-center gap-2.5">
-              <Shield className="w-4 h-4 text-cyan-400" />
-              <div>
-                <span className="text-xs font-bold text-white block">Requires IMEI / Serial Number Tracking</span>
-                <span className="text-[11px] text-slate-400">Prompt operators to record IMEI during invoice checkout</span>
+          {similarExistingProducts.length > 0 && (
+            <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4 space-y-2.5 shadow-sm">
+              <p className="text-xs font-black text-amber-800 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{isAdmin ? 'Already in the database — edit one of these instead of creating a duplicate?' : 'Already in the database — check before creating a duplicate.'}</span>
+              </p>
+              <div className="space-y-1.5">
+                {similarExistingProducts.map((p) => (
+                  // Admins can jump straight to editing; standard staff (who can't edit) see it as
+                  // an informational duplicate warning only.
+                  isAdmin ? (
+                    <button
+                      type="button"
+                      key={p.id}
+                      onClick={() => handleEdit(p)}
+                      className="w-full text-left p-2.5 rounded-lg bg-white border border-amber-200 hover:border-amber-400 hover:bg-amber-50/60 transition-colors flex items-center justify-between gap-2"
+                    >
+                      <span className="font-bold text-xs text-slate-900">{p.name}</span>
+                      <span className="font-mono text-[10px] text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold whitespace-nowrap">{p.barcode}</span>
+                    </button>
+                  ) : (
+                    <div
+                      key={p.id}
+                      className="w-full text-left p-2.5 rounded-lg bg-white border border-amber-200 flex items-center justify-between gap-2"
+                    >
+                      <span className="font-bold text-xs text-slate-900">{p.name}</span>
+                      <span className="font-mono text-[10px] text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold whitespace-nowrap">{p.barcode}</span>
+                    </div>
+                  )
+                ))}
               </div>
             </div>
-            <input
-              type="checkbox"
-              checked={formData.imeiRequired}
-              onChange={(e) => setFormData({ ...formData, imeiRequired: e.target.checked })}
-              className="w-5 h-5 accent-purple-500 rounded cursor-pointer"
-            />
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="form-group mb-0">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Model / SKU (Optional)</label>
+              <input
+                type="text"
+                value={formData.sku}
+                onChange={(e) => setFormData({ ...formData, sku: e.target.value })}
+                placeholder="e.g. MK1A3HN/A"
+                className="input-field font-mono font-bold text-slate-900 bg-white border-slate-300 py-2.5"
+              />
+            </div>
           </div>
 
-          <div className="pt-4 flex justify-end gap-3 border-t border-white/10 mt-6">
+          <div className="pt-4 flex justify-end gap-3 border-t-2 border-slate-200 mt-6">
             <button
               type="button"
               onClick={() => setShowModal(false)}
-              className="btn btn-outline"
+              className="btn btn-outline font-bold px-5 py-2.5"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="btn btn-primary"
+              className="btn btn-primary font-bold px-6 py-2.5 shadow-md"
             >
               <Check className="w-4 h-4" /> {editingProduct ? 'Update Device' : 'Save Device'}
             </button>
           </div>
         </form>
       </Modal>
+
+      {/* --- BULK IMPORT MODAL (admin only) --- */}
+      <ImportExcelModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        entityLabel="Product Master"
+        templateHeaders={PRODUCT_TEMPLATE_HEADERS}
+        onImport={handleImport}
+      />
 
     </div>
   );

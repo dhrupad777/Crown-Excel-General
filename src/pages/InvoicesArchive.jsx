@@ -1,31 +1,51 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Search, 
-  FileText, 
-  Printer, 
-  Download, 
-  Trash2, 
-  Calendar, 
-  User, 
-  DollarSign, 
-  Filter, 
-  Eye, 
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Search,
+  FileText,
+  Printer,
+  Download,
+  Trash2,
+  Eye,
   CheckCircle2,
-  ExternalLink,
-  Archive,
   Shield,
-  Smartphone
+  Smartphone,
+  CalendarRange,
+  AlertTriangle
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
+import { DateRangeCalendar } from '../components/DateRangeCalendar';
+import { exportToCsv, formatLocalDate } from '../utils/exportUtils';
+import { useAuth } from '../context/AuthContext';
 
 export const InvoicesArchive = ({ initialInvoiceId }) => {
+  const { isAdmin, user } = useAuth();
   const [invoices, setInvoices] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [dateFilter, setDateFilter] = useState('all'); // 'all', 'today', 'week', 'month'
-  
+  const [dateFilter, setDateFilter] = useState('all'); // 'all', 'today', 'week', 'month', 'custom'
+  const [customRangeStart, setCustomRangeStart] = useState(null);
+  const [customRangeEnd, setCustomRangeEnd] = useState(null);
+  const [showCalendarPopover, setShowCalendarPopover] = useState(false);
+  const calendarPopoverRef = useRef(null);
+
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showQueryForm, setShowQueryForm] = useState(false);
+  const [queryNote, setQueryNote] = useState('');
+
+  // Close the calendar popover on an outside click — no dropdown elsewhere in this app needs
+  // this (they close via explicit selection instead), but a calendar left open until you
+  // deliberately hit Apply/Cancel/Clear would feel broken next to a real booking-site picker.
+  useEffect(() => {
+    if (!showCalendarPopover) return;
+    const handleClickOutside = (e) => {
+      if (calendarPopoverRef.current && !calendarPopoverRef.current.contains(e.target)) {
+        setShowCalendarPopover(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showCalendarPopover]);
 
   // Load Invoices
   const loadInvoices = () => {
@@ -51,20 +71,13 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     }
   }, [initialInvoiceId]);
 
-  // Filtered Invoices
+  // Filtered Invoices — text-match dimension is centralized in storageService.searchInvoices
+  // (also used elsewhere for serial-number warranty lookups), date-range tabs stay local to this page.
+  const searchMatchIds = new Set(storageService.searchInvoices(searchQuery).map(inv => inv.id));
+
   const filteredInvoices = invoices.filter((inv) => {
     // 1. Search Query
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      const matchRef = inv.whatsappRef?.toLowerCase().includes(q) || inv.id?.toLowerCase().includes(q);
-      const matchCust = inv.customer?.name?.toLowerCase().includes(q) || inv.customer?.whatsapp?.toLowerCase().includes(q) || inv.customer?.company?.toLowerCase().includes(q);
-      const matchItems = inv.items?.some(item => 
-        item.name?.toLowerCase().includes(q) || 
-        item.barcode?.toLowerCase().includes(q) ||
-        item.imei?.toLowerCase().includes(q)
-      );
-      if (!matchRef && !matchCust && !matchItems) return false;
-    }
+    if (searchQuery.trim() && !searchMatchIds.has(inv.id)) return false;
 
     // 2. Date Filter
     if (dateFilter !== 'all') {
@@ -80,19 +93,33 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
       if (dateFilter === 'month') {
         return invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear();
       }
+      if (dateFilter === 'custom') {
+        if (!customRangeStart || !customRangeEnd) return true;
+        // The end date arrives as a bare calendar day (midnight) — clamp it to the end of that
+        // day before comparing, otherwise every invoice with a real time-of-day later than
+        // midnight would be wrongly excluded (picking "today" as both ends would show 0 results).
+        const start = new Date(customRangeStart.getFullYear(), customRangeStart.getMonth(), customRangeStart.getDate(), 0, 0, 0, 0);
+        const end = new Date(customRangeEnd.getFullYear(), customRangeEnd.getMonth(), customRangeEnd.getDate(), 23, 59, 59, 999);
+        return invDate >= start && invDate <= end;
+      }
+      return true;
     }
 
     return true;
   });
 
+  // Item-level matches for the "Matching Items" view — see storageService.searchInvoiceItems.
+  // Deliberately not scoped to the active date-filter tab: it answers "show me every sale
+  // matching this, ever," mirroring how the serial warranty lookup is already time-independent.
+  const matchingItems = searchQuery.trim() ? storageService.searchInvoiceItems(searchQuery) : [];
+
   // Totals of Filtered Records
-  const totalFilteredRevenue = filteredInvoices.reduce((acc, inv) => acc + (inv.total || 0), 0);
   const totalFilteredItems = filteredInvoices.reduce((acc, inv) => acc + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
 
   // Handle Delete
   const handleDeleteInvoice = (id, e) => {
     e.stopPropagation();
-    if (window.confirm("Are you sure you want to delete this warranty invoice record?")) {
+    if (window.confirm("Are you sure you want to delete this invoice record?")) {
       storageService.deleteInvoice(id);
       loadInvoices();
       if (selectedInvoice && selectedInvoice.id === id) {
@@ -101,37 +128,27 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     }
   };
 
-  // Export to CSV
+  // Export to CSV (shared export utils — real Blob download, proper quoting)
   const handleExportCSV = () => {
     if (filteredInvoices.length === 0) {
       alert("No invoices to export.");
       return;
     }
 
-    const headers = ["Invoice ID", "WhatsApp Ref", "Date", "Customer Name", "WhatsApp Number", "Devices Count", "IMEI / Serials Recorded", "Subtotal ($)", "Tax ($)", "Discount ($)", "Total Paid ($)", "Notes"];
+    const headers = ["Invoice Number", "Date & Time", "Partner Name", "Partner Phone", "Items Count", "Serial Numbers Recorded"];
     const rows = filteredInvoices.map(inv => [
       inv.id,
-      inv.whatsappRef || '',
       new Date(inv.date).toLocaleString(),
-      `"${inv.customer?.name || ''}"`,
-      `"${inv.customer?.whatsapp || ''}"`,
+      inv.customer?.name || '',
+      inv.customer?.whatsapp || '',
       inv.items?.length || 0,
-      `"${inv.items?.map(i => i.imei ? `${i.name}: [${i.imei}]` : '').filter(Boolean).join('; ') || 'N/A'}"`,
-      inv.subtotal?.toFixed(2) || '0.00',
-      inv.taxAmount?.toFixed(2) || '0.00',
-      inv.discount?.toFixed(2) || '0.00',
-      inv.total?.toFixed(2) || '0.00',
-      `"${inv.notes || ''}"`
+      inv.items?.map(i => i.imei ? `${i.name}: [${i.imei}]` : '').filter(Boolean).join('; ') || 'N/A'
     ]);
 
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `Crown_Excel_Electronics_Invoices_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const filenameDatePart = (dateFilter === 'custom' && customRangeStart && customRangeEnd)
+      ? `${formatLocalDate(customRangeStart)}_to_${formatLocalDate(customRangeEnd)}`
+      : formatLocalDate(new Date());
+    exportToCsv({ filename: `Crown_Excel_Invoices_${filenameDatePart}.csv`, headers, rows });
   };
 
   // Print Invoice Function
@@ -140,183 +157,267 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-      
-      {/* Top Banner & Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="glass-panel p-5 bg-gradient-to-br from-emerald-500/15 via-slate-900 to-slate-950 border-l-4 border-l-emerald-500 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase">
-            <span>Filtered Revenue</span>
-            <DollarSign className="w-4 h-4 text-emerald-400" />
-          </div>
-          <div className="font-heading font-black text-2xl text-white font-mono mt-2">
-            ${totalFilteredRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <div className="text-[11px] text-emerald-400 mt-1">Across {filteredInvoices.length} warranty bills</div>
-        </div>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 font-body">
 
-        <div className="glass-panel p-5 bg-gradient-to-br from-cyan-500/15 via-slate-900 to-slate-950 border-l-4 border-l-cyan-500 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase">
+      {/* Top Banner & Stats */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-emerald-600 flex flex-col justify-between">
+          <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
             <span>Invoices Count</span>
-            <FileText className="w-4 h-4 text-cyan-400" />
+            <FileText className="w-4 h-4 text-emerald-600" />
           </div>
-          <div className="font-heading font-black text-2xl text-white font-mono mt-2">
+          <div className="font-heading font-black text-2xl text-slate-900 font-mono mt-2">
             {filteredInvoices.length}
           </div>
-          <div className="text-[11px] text-cyan-400 mt-1">Total indexed records</div>
+          <div className="text-[11px] font-bold text-emerald-600 mt-1">Across {filteredInvoices.length > 0 ? 'filtered' : 'no'} bills</div>
         </div>
 
-        <div className="glass-panel p-5 bg-gradient-to-br from-purple-500/15 via-slate-900 to-slate-950 border-l-4 border-l-purple-500 shadow-lg">
-          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase">
-            <span>Devices Sold</span>
-            <Smartphone className="w-4 h-4 text-purple-400" />
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-[#2563eb] flex flex-col justify-between">
+          <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
+            <span>Invoices Count</span>
+            <FileText className="w-4 h-4 text-[#2563eb]" />
           </div>
-          <div className="font-heading font-black text-2xl text-white font-mono mt-2">
+          <div className="font-heading font-black text-2xl text-slate-900 font-mono mt-2">
+            {filteredInvoices.length}
+          </div>
+          <div className="text-[11px] font-bold text-[#2563eb] mt-1">Total indexed records</div>
+        </div>
+
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 shadow-sm border-l-4 border-l-purple-600 flex flex-col justify-between">
+          <div className="flex items-center justify-between text-slate-500 text-[11px] font-black uppercase tracking-wider">
+            <span>Items Sold</span>
+            <Smartphone className="w-4 h-4 text-purple-600" />
+          </div>
+          <div className="font-heading font-black text-2xl text-slate-900 font-mono mt-2">
             {totalFilteredItems}
           </div>
-          <div className="text-[11px] text-purple-400 mt-1">Laptops, phones & gadgets</div>
+          <div className="text-[11px] font-bold text-purple-600 mt-1">Across all filtered bills</div>
         </div>
 
-        <div className="glass-panel p-5 flex flex-col justify-center gap-2 border-l-4 border-l-slate-600 shadow-lg">
+        <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 flex flex-col justify-center gap-2.5 shadow-sm border-l-4 border-l-slate-700">
           <button
             onClick={handleExportCSV}
-            className="btn btn-secondary w-full py-2.5 text-xs flex items-center justify-center gap-1.5 shadow-md"
+            className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10"
           >
-            <Download className="w-4 h-4" /> Export Invoices & IMEIs (CSV)
+            <Download className="w-4 h-4" /> Export Invoices
           </button>
-          <div className="text-[10px] text-center text-slate-400 font-medium">
-            Includes warranty serial numbers
+          <div className="text-[11px] text-center text-slate-600 font-bold">
+            Includes serial numbers
           </div>
         </div>
       </div>
 
       {/* Queryable Search Bar & Filters */}
-      <div className="glass-panel p-5 space-y-4">
-        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-          
+      <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 space-y-4 shadow-sm">
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
+
           {/* Instant Search Box */}
-          <div className="relative w-full md:w-96">
-            <Search className="w-4 h-4 text-emerald-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <div className="relative w-full lg:w-96">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by WhatsApp Ref, Customer, IMEI / Serial #, Model..."
-              className="input-field pl-10 pr-4 py-2.5 text-sm bg-slate-900 border-emerald-500/30 focus:border-emerald-500 font-medium"
+              placeholder="Search by Invoice #, Partner, Serial #, Item..."
+              className="input-field pl-10 pr-16 py-3 text-sm bg-white border-slate-400 focus:border-[#2563eb] font-bold text-slate-900 w-full rounded-xl shadow-inner"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white"
+                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 hover:text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg"
               >
                 Clear
               </button>
             )}
           </div>
 
-          {/* Date Range Tabs */}
-          <div className="flex items-center gap-1 bg-slate-900 p-1.5 rounded-2xl border border-white/10 w-full md:w-auto overflow-x-auto shadow-inner">
-            {[
-              { id: 'all', label: 'All Records' },
-              { id: 'today', label: 'Today' },
-              { id: 'week', label: 'Last 7 Days' },
-              { id: 'month', label: 'This Month' },
-            ].map((tab) => (
+          {/* Date Range Tabs — the calendar popover is rendered outside the
+              overflow-x-auto container so it isn't clipped by the scroll boundary. */}
+          <div className="relative" ref={calendarPopoverRef}>
+            <div className="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border-2 border-slate-300 w-full lg:w-auto overflow-x-auto shadow-inner">
+              {[
+                { id: 'all', label: 'All Records' },
+                { id: 'today', label: 'Today' },
+                { id: 'week', label: 'Last 7 Days' },
+                { id: 'month', label: 'This Month' },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setDateFilter(tab.id)}
+                  className={`px-4 py-2 rounded-xl text-xs font-heading font-bold transition-all whitespace-nowrap flex-1 lg:flex-initial text-center ${
+                    dateFilter === tab.id
+                      ? 'bg-[#2563eb] text-white shadow-md shadow-blue-500/20 font-black'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+
               <button
-                key={tab.id}
-                onClick={() => setDateFilter(tab.id)}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-heading font-semibold transition-all whitespace-nowrap ${
-                  dateFilter === tab.id 
-                    ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-md shadow-emerald-500/30 scale-105' 
-                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                type="button"
+                onClick={() => setShowCalendarPopover((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={showCalendarPopover}
+                className={`px-4 py-2 rounded-xl text-xs font-heading font-bold transition-all whitespace-nowrap flex-1 lg:flex-initial text-center flex items-center justify-center gap-1.5 ${
+                  dateFilter === 'custom'
+                    ? 'bg-[#2563eb] text-white shadow-md shadow-blue-500/20 font-black'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
                 }`}
               >
-                {tab.label}
+                <CalendarRange className="w-3.5 h-3.5" />
+                <span>
+                  {dateFilter === 'custom' && customRangeStart && customRangeEnd
+                    ? `${customRangeStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${customRangeEnd.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+                    : 'Custom Range'}
+                </span>
               </button>
-            ))}
+            </div>
+
+            {showCalendarPopover && (
+              <div className="absolute z-30 top-full right-0 mt-2">
+                <DateRangeCalendar
+                  initialStart={customRangeStart}
+                  initialEnd={customRangeEnd}
+                  onApplyRange={(start, end) => {
+                    setCustomRangeStart(start);
+                    setCustomRangeEnd(end);
+                    setDateFilter('custom');
+                    setShowCalendarPopover(false);
+                  }}
+                  onSelectExistingTab={(id) => {
+                    setDateFilter(id);
+                    setShowCalendarPopover(false);
+                  }}
+                  onCancel={() => setShowCalendarPopover(false)}
+                  onClear={() => {
+                    setCustomRangeStart(null);
+                    setCustomRangeEnd(null);
+                    setDateFilter('all');
+                    setShowCalendarPopover(false);
+                  }}
+                />
+              </div>
+            )}
           </div>
 
         </div>
 
-        <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-white/5">
-          <span>⚡ Instant 0ms Local Query Engine Active</span>
-          <span>Showing <b>{filteredInvoices.length}</b> of <b>{invoices.length}</b> total warranty invoices</span>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs font-bold text-slate-500 pt-3 border-t-2 border-slate-200 gap-2">
+          <span className="flex items-center gap-1.5 text-[#2563eb]">
+            <CheckCircle2 className="w-4 h-4" /> Instant 0ms Local Query Engine Active
+          </span>
+          <span>Showing <b className="text-slate-900">{filteredInvoices.length}</b> of <b className="text-slate-900">{invoices.length}</b> total invoices</span>
         </div>
       </div>
 
+      {/* Matching Items — item-level search results, e.g. searching "macbook" surfaces every
+          sold MacBook directly with its invoice, date, and buyer, instead of only the invoices
+          containing one. Intentionally ignores the date-filter tab (see matchingItems above). */}
+      {searchQuery.trim() && matchingItems.length > 0 && (
+        <div className="bg-white border-2 border-purple-300 rounded-2xl overflow-hidden shadow-sm border-t-4 border-t-purple-600">
+          <div className="p-4 border-b-2 border-slate-200 bg-slate-50 flex items-center gap-2.5">
+            <Search className="w-4 h-4 text-purple-600" />
+            <h3 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">Matching Items</h3>
+            <span className="bg-purple-100 text-purple-700 font-bold px-2.5 py-0.5 rounded-full text-[11px]">{matchingItems.length}</span>
+          </div>
+          <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+            {matchingItems.map(({ invoice, item }, idx) => (
+              <div
+                key={`${invoice.id}-${idx}`}
+                onClick={() => { setSelectedInvoice(invoice); setShowDetailModal(true); }}
+                className="p-4 hover:bg-slate-50 cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition-colors"
+              >
+                <div>
+                  <div className="font-black text-sm text-slate-900">{item.name}</div>
+                  <div className="mt-0.5">
+                    {item.imei ? (
+                      <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">
+                        <Shield className="w-3 h-3" /> {item.imei}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-slate-400 font-semibold italic">No serial recorded</span>
+                    )}
+                  </div>
+                </div>
+                <div className="text-left sm:text-right">
+                  <div className="font-mono text-xs font-bold text-slate-700">
+                    {invoice.id} • {new Date(invoice.date).toLocaleDateString()}
+                  </div>
+                  <div className="text-xs font-bold text-slate-600 mt-0.5">{invoice.customer?.name || 'Unknown'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Invoices Table */}
-      <div className="glass-panel overflow-hidden">
+      <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden shadow-sm">
         {filteredInvoices.length === 0 ? (
           <div className="p-16 text-center text-slate-500 space-y-3">
-            <FileText className="w-12 h-12 mx-auto text-slate-600 animate-pulse" />
-            <div className="font-heading font-semibold text-slate-300 text-base">No matching invoices found</div>
-            <p className="text-xs max-w-md mx-auto">
-              Try searching for a different WhatsApp Ref, customer name, device IMEI serial number, or adjust the date filters above.
+            <FileText className="w-12 h-12 mx-auto text-slate-400 animate-pulse" />
+            <div className="font-heading font-black text-slate-800 text-lg">No matching invoices found</div>
+            <p className="text-xs font-semibold max-w-md mx-auto text-slate-500">
+              Try searching for a different invoice number, partner name, serial number, or adjust the date filters above.
             </p>
           </div>
         ) : (
-          <div className="table-container border-0 rounded-none">
-            <table className="table-modern">
+          <div className="table-container border-0 rounded-none w-full overflow-x-auto">
+            <table className="data-table w-full min-w-[700px]">
               <thead>
                 <tr>
-                  <th>WhatsApp Ref</th>
-                  <th>Invoice ID & Date</th>
-                  <th>Customer Details</th>
-                  <th className="text-center">Devices</th>
-                  <th className="text-right">Total Amount</th>
-                  <th className="text-center">Status</th>
-                  <th className="text-right">Actions</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Invoice # & Date/Time</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Partner Details</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-center">Items</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-slate-100">
                 {filteredInvoices.map((inv) => (
-                  <tr 
-                    key={inv.id} 
-                    onClick={() => { setSelectedInvoice(inv); setShowDetailModal(true); }}
-                    className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                  <tr
+                    key={inv.id}
+                    onClick={() => { setSelectedInvoice(inv); setShowQueryForm(false); setQueryNote(''); setShowDetailModal(true); }}
+                    className="hover:bg-slate-50 cursor-pointer transition-colors group"
                   >
-                    <td>
-                      <span className="badge badge-success font-mono text-xs px-2 py-1 shadow-sm">
-                        {inv.whatsappRef || '#WA-N/A'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="font-heading font-bold text-white text-sm">{inv.id}</div>
-                      <div className="text-[11px] text-slate-400">
+                    <td className="py-4 px-6">
+                      <div className="font-heading font-black text-slate-900 text-sm flex items-center gap-2">
+                        <span>{inv.id}</span>
+                        {inv.query && !inv.query.resolved && (
+                          <span className="inline-flex items-center gap-0.5 bg-red-50 text-red-600 border border-red-200 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded animate-pulse">
+                            <AlertTriangle className="w-3 h-3 text-red-500" /> Query
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] font-bold text-slate-500 mt-0.5">
                         {new Date(inv.date).toLocaleDateString()} • {new Date(inv.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </div>
                     </td>
-                    <td>
-                      <div className="font-semibold text-white">{inv.customer?.name || 'Unknown'}</div>
-                      <div className="font-mono text-[11px] text-cyan-300">{inv.customer?.whatsapp || ''}</div>
+                    <td className="py-4 px-6">
+                      <div className="font-black text-slate-900 text-sm">{inv.customer?.name || 'Unknown'}</div>
+                      <div className="font-mono text-xs font-bold text-[#2563eb] mt-0.5">{inv.customer?.whatsapp || ''}</div>
                     </td>
-                    <td className="text-center font-mono text-slate-300">
-                      <span className="badge badge-purple">{inv.items?.length || 0} items</span>
+                    <td className="py-4 px-6 text-center font-mono text-slate-700">
+                      <span className="bg-purple-50 text-purple-700 border border-purple-200 font-bold px-3 py-1 rounded-full text-xs">{inv.items?.length || 0} items</span>
                     </td>
-                    <td className="text-right font-mono font-black text-emerald-400 text-base">
-                      ${inv.total?.toFixed(2)}
-                    </td>
-                    <td className="text-center">
-                      <span className="badge badge-info text-[10px]">
-                        {inv.status || 'Paid'}
-                      </span>
-                    </td>
-                    <td className="text-right">
+                    <td className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button
                           onClick={(e) => { e.stopPropagation(); setSelectedInvoice(inv); setShowDetailModal(true); }}
-                          className="p-2 rounded-lg bg-slate-800 hover:bg-emerald-500/20 text-slate-300 hover:text-emerald-400 transition-colors shadow-sm"
-                          title="View Invoice & IMEIs"
+                          className="p-2 rounded-lg bg-slate-100 hover:bg-blue-100 text-slate-600 hover:text-[#2563eb] transition-colors shadow-sm"
+                          title="View Invoice"
                         >
                           <Eye className="w-4 h-4" />
                         </button>
-                        <button
-                          onClick={(e) => handleDeleteInvoice(inv.id, e)}
-                          className="p-2 rounded-lg bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors shadow-sm"
-                          title="Delete Record"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {isAdmin && (
+                          <button
+                            onClick={(e) => handleDeleteInvoice(inv.id, e)}
+                            className="p-2 rounded-lg bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 transition-colors shadow-sm"
+                            title="Delete Record (admin only)"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -331,142 +432,215 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
       <Modal
         isOpen={showDetailModal}
         onClose={() => setShowDetailModal(false)}
-        title={selectedInvoice ? `Warranty Invoice — ${selectedInvoice.id}` : 'Invoice'}
-        subtitle={selectedInvoice ? `WhatsApp Reference: ${selectedInvoice.whatsappRef}` : ''}
+        title={selectedInvoice ? `Invoice — ${selectedInvoice.id}` : 'Invoice'}
+        subtitle={selectedInvoice ? new Date(selectedInvoice.date).toLocaleString() : ''}
         icon={FileText}
         maxWidth="max-w-3xl"
       >
         {selectedInvoice && (
-          <div className="space-y-6">
-            
+          <div className="space-y-6 font-body">
+
             {/* Printable Invoice Header Box */}
-            <div className="p-6 rounded-2xl bg-slate-900/90 border border-white/10 space-y-4 shadow-xl">
-              <div className="flex justify-between items-start border-b border-white/10 pb-4">
+            <div className="p-6 rounded-2xl bg-white border-2 border-slate-300 space-y-4 shadow-sm">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b-2 border-slate-200 pb-4 gap-2">
                 <div>
-                  <h2 className="font-heading font-black text-2xl text-white tracking-tight bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+                  <h2 className="font-heading font-black text-2xl text-slate-900 tracking-tight">
                     CROWN EXCEL ELECTRONICS
                   </h2>
-                  <p className="text-xs text-slate-400">Enterprise Laptops, Mobile Phones & Gadgets Billing</p>
+                  <p className="text-xs font-bold text-slate-500">Enterprise Laptops, Mobile Phones & Gadgets Billing</p>
                 </div>
-                <div className="text-right">
-                  <div className="badge badge-success font-mono text-xs">{selectedInvoice.whatsappRef}</div>
-                  <div className="font-mono text-xs text-slate-300 mt-1">
-                    Date: {new Date(selectedInvoice.date).toLocaleDateString()}
+                <div className="text-left sm:text-right">
+                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.id}</div>
+                  <div className="font-mono text-xs font-bold text-slate-600 mt-1">
+                    {new Date(selectedInvoice.date).toLocaleDateString()} • {new Date(selectedInvoice.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
                 </div>
               </div>
 
-              {/* Customer & Bill Details */}
-              <div className="grid grid-cols-2 gap-4 text-xs">
+              {/* Partner & Bill Details */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
-                  <span className="text-slate-400 uppercase font-bold text-[10px] block mb-1">Billed To Customer:</span>
-                  <div className="font-heading font-bold text-sm text-white">{selectedInvoice.customer?.name}</div>
+                  <span className="text-slate-400 uppercase font-black text-[10px] tracking-wider block mb-1">Billed To Partner:</span>
+                  <div className="font-heading font-black text-base text-slate-900">{selectedInvoice.customer?.name}</div>
                   {selectedInvoice.customer?.company && (
-                    <div className="text-slate-300">{selectedInvoice.customer.company}</div>
+                    <div className="font-bold text-slate-600">{selectedInvoice.customer.company}</div>
                   )}
-                  <div className="font-mono text-cyan-300 mt-0.5">WhatsApp: {selectedInvoice.customer?.whatsapp}</div>
+                  <div className="font-mono font-bold text-[#2563eb] mt-0.5">{selectedInvoice.customer?.whatsapp}</div>
                   {selectedInvoice.customer?.email && (
-                    <div className="text-slate-400">{selectedInvoice.customer.email}</div>
-                  )}
-                </div>
-                <div className="text-right">
-                  <span className="text-slate-400 uppercase font-bold text-[10px] block mb-1">Payment Status:</span>
-                  <div className="badge badge-info text-xs inline-block mb-2 shadow-sm">PAID / WARRANTY VERIFIED</div>
-                  {selectedInvoice.notes && (
-                    <div className="text-slate-300 italic max-w-xs ml-auto bg-slate-950 p-2 rounded border border-white/5">"{selectedInvoice.notes}"</div>
+                    <div className="text-slate-500 font-medium">{selectedInvoice.customer.email}</div>
                   )}
                 </div>
               </div>
 
               {/* Itemized Table */}
-              <div className="border border-white/10 rounded-xl overflow-hidden mt-4">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-800 text-slate-300 uppercase font-heading text-[10px]">
+              <div className="border-2 border-slate-300 rounded-xl overflow-x-auto mt-4">
+                <table className="w-full text-left text-xs min-w-[500px]">
+                  <thead className="bg-slate-50 text-slate-700 uppercase font-heading font-black text-[10px] border-b-2 border-slate-300">
                     <tr>
-                      <th className="p-3">Device Model & Specs</th>
-                      <th className="p-3">IMEI / Serial Number</th>
-                      <th className="p-3 text-right">Price</th>
+                      <th className="p-3">Item</th>
+                      <th className="p-3">Serial Number</th>
                       <th className="p-3 text-center">Qty</th>
-                      <th className="p-3 text-right">Total</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-white/5 font-mono">
+                  <tbody className="divide-y divide-slate-100 font-mono">
                     {selectedInvoice.items?.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-white/5">
+                      <tr key={idx} className="hover:bg-slate-50/80">
                         <td className="p-3 font-sans">
-                          <div className="font-bold text-white text-sm">{item.name}</div>
-                          <div className="text-[10px] text-slate-400 font-mono">#{item.barcode} ({item.category || 'Electronics'})</div>
+                          <div className="font-black text-slate-900 text-sm">{item.name}</div>
+                          <div className="text-[11px] font-bold text-slate-500 font-mono">#{item.barcode} ({item.category || 'Electronics'})</div>
                         </td>
                         <td className="p-3">
                           {item.imei ? (
-                            <span className="inline-flex items-center gap-1 font-mono text-xs text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20 font-bold">
-                              <Shield className="w-3 h-3 text-cyan-400" />
+                            <span className="inline-flex items-center gap-1 font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 font-bold">
+                              <Shield className="w-3.5 h-3.5 text-[#2563eb]" />
                               <span>{item.imei}</span>
                             </span>
                           ) : (
-                            <span className="text-slate-500 italic text-[11px]">No serial recorded</span>
+                            <span className="text-slate-400 font-semibold italic text-[11px]">No serial recorded</span>
                           )}
                         </td>
-                        <td className="p-3 text-right">${item.price?.toFixed(2)}</td>
-                        <td className="p-3 text-center font-bold text-white">{item.qty}</td>
-                        <td className="p-3 text-right font-bold text-emerald-400 text-sm">${item.total?.toFixed(2)}</td>
+                        <td className="p-3 text-center font-black text-slate-900">{item.qty}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
 
-              {/* Totals Summary */}
-              <div className="space-y-1.5 text-xs text-right pt-2">
-                <div className="flex justify-between text-slate-400">
-                  <span>Subtotal:</span>
-                  <span className="font-mono">${selectedInvoice.subtotal?.toFixed(2)}</span>
-                </div>
-                {selectedInvoice.taxAmount > 0 && (
-                  <div className="flex justify-between text-slate-400">
-                    <span>Tax ({selectedInvoice.taxRate || 0}%):</span>
-                    <span className="font-mono">+${selectedInvoice.taxAmount?.toFixed(2)}</span>
+              {/* Active Query Display / Concern Form */}
+              {selectedInvoice.query && (
+                <div className="p-4 rounded-xl border-2 border-red-200 bg-red-50 text-red-800 space-y-2 mt-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-heading font-black text-xs uppercase tracking-wider flex items-center gap-1">
+                      <AlertTriangle className="w-4 h-4 text-red-500" /> Active Query / Concern
+                    </span>
+                    {selectedInvoice.query.resolved ? (
+                      <span className="bg-emerald-100 text-emerald-800 text-xs px-2.5 py-0.5 rounded font-bold uppercase">Resolved</span>
+                    ) : (
+                      <span className="bg-red-100 text-red-800 text-xs px-2.5 py-0.5 rounded font-bold uppercase">Pending Admin Action</span>
+                    )}
                   </div>
-                )}
-                {selectedInvoice.discount > 0 && (
-                  <div className="flex justify-between text-emerald-400">
-                    <span>Discount:</span>
-                    <span className="font-mono">-${selectedInvoice.discount?.toFixed(2)}</span>
+                  <p className="text-xs font-semibold">"{selectedInvoice.query.note}"</p>
+                  <div className="text-[10px] font-bold text-slate-500">
+                    Raised by {selectedInvoice.query.raisedByName} ({selectedInvoice.query.raisedBy}) on {new Date(selectedInvoice.query.raisedAt).toLocaleString()}
+                    {selectedInvoice.query.resolved && selectedInvoice.query.resolvedBy && (
+                      <span className="block mt-1 font-bold text-emerald-700">✓ Resolved by {selectedInvoice.query.resolvedBy} on {new Date(selectedInvoice.query.resolvedAt).toLocaleString()}</span>
+                    )}
                   </div>
-                )}
-                <div className="border-t border-white/10 pt-3 flex justify-between items-center text-sm font-bold text-white">
-                  <span>Total Amount Paid:</span>
-                  <span className="font-heading font-black text-2xl text-emerald-400 font-mono drop-shadow">
-                    ${selectedInvoice.total?.toFixed(2)}
-                  </span>
+                  {!selectedInvoice.query.resolved && isAdmin && (
+                    <button
+                      onClick={async () => {
+                        const updated = {
+                          ...selectedInvoice,
+                          query: {
+                            ...selectedInvoice.query,
+                            resolved: true,
+                            resolvedBy: user?.email || 'Admin',
+                            resolvedAt: new Date().toISOString()
+                          }
+                        };
+                        const saved = await storageService.saveInvoice(updated);
+                        if (saved) {
+                          setSelectedInvoice(saved);
+                          loadInvoices();
+                        }
+                      }}
+                      className="btn btn-primary text-xs py-1.5 px-3 font-bold bg-emerald-600 hover:bg-emerald-700 shadow-none border-0 text-white mt-1"
+                    >
+                      Resolve Query
+                    </button>
+                  )}
                 </div>
-              </div>
+              )}
+
+              {(!selectedInvoice.query || selectedInvoice.query.resolved) && (
+                <div className="no-print pt-3 mt-4">
+                  {!showQueryForm ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowQueryForm(true)}
+                      className="btn btn-outline text-amber-700 border-amber-300 hover:bg-amber-50 font-bold text-xs py-2 px-3.5"
+                    >
+                      ⚠️ Raise Concern / Query
+                    </button>
+                  ) : (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                      <label className="text-[11px] font-black text-amber-800 uppercase tracking-wider block">
+                        Describe the concern or mistake with this bill:
+                      </label>
+                      <textarea
+                        value={queryNote}
+                        onChange={(e) => setQueryNote(e.target.value)}
+                        placeholder="e.g. Scanned device serial numbers are correct, but selected partner is wrong. Need to change partner to Rajesh Kumar."
+                        rows={2}
+                        className="w-full text-xs font-semibold p-2.5 rounded-lg border border-amber-300 bg-white text-slate-900 focus:outline-none focus:border-amber-500 resize-none"
+                      />
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          type="button"
+                          onClick={() => { setShowQueryForm(false); setQueryNote(''); }}
+                          className="btn btn-outline text-slate-600 py-1.5 px-3 text-xs"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!queryNote.trim()) return;
+                            const updated = {
+                              ...selectedInvoice,
+                              query: {
+                                note: queryNote.trim(),
+                                raisedBy: user?.email || 'unknown',
+                                raisedByName: user?.displayName || user?.email || 'Staff Member',
+                                raisedAt: new Date().toISOString(),
+                                resolved: false
+                              }
+                            };
+                            const saved = await storageService.saveInvoice(updated);
+                            if (saved) {
+                              setSelectedInvoice(saved);
+                              setShowQueryForm(false);
+                              setQueryNote('');
+                              loadInvoices();
+                            }
+                          }}
+                          className="btn btn-primary text-xs py-1.5 px-3 bg-amber-600 hover:bg-amber-700 shadow-none border-0 text-white font-bold"
+                        >
+                          Submit Query
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Modal Actions */}
-            <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
-              <button
-                type="button"
-                onClick={() => handleDeleteInvoice(selectedInvoice.id, { stopPropagation: () => {} })}
-                className="btn btn-outline text-red-400 border-red-500/30 hover:bg-red-500/10 mr-auto"
-              >
-                <Trash2 className="w-4 h-4" /> Delete Invoice
-              </button>
-              
+            <div className="no-print flex flex-wrap items-center justify-end gap-3 pt-4 border-t-2 border-slate-200">
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => handleDeleteInvoice(selectedInvoice.id, { stopPropagation: () => {} })}
+                  className="btn btn-outline text-red-600 border-red-300 hover:bg-red-50 font-bold py-2.5 px-4 mr-auto"
+                >
+                  <Trash2 className="w-4 h-4" /> Delete Invoice
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setShowDetailModal(false)}
-                className="btn btn-outline"
+                className="btn btn-outline font-bold py-2.5 px-5"
               >
                 Close
               </button>
-              
+
               <button
                 type="button"
                 onClick={handlePrintInvoice}
-                className="btn btn-primary"
+                className="btn btn-primary font-bold py-2.5 px-6 shadow-md"
               >
-                <Printer className="w-4 h-4" /> Print Warranty PDF
+                <Printer className="w-4 h-4" /> Print Invoice
               </button>
             </div>
 
