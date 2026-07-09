@@ -16,12 +16,15 @@ import {
   Ban,
   AlertTriangle,
   FileText,
-  Shield
+  Shield,
+  Archive,
+  RotateCcw,
+  Trash2
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
-import { BOOTSTRAP_ADMIN_EMAILS } from '../config/appConfig';
+import { BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
 
 const SectionCard = ({ title, subtitle, icon: Icon, accent, actions, children }) => (
   <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden shadow-sm">
@@ -46,6 +49,7 @@ export const AdminPage = () => {
   const [staffList, setStaffList] = useState(() => storageService.getStaff());
   const [locations, setLocations] = useState(() => storageService.getLocations());
   const [invoices, setInvoices] = useState(() => storageService.getInvoices());
+  const [archived, setArchived] = useState(() => storageService.getArchivedRecords());
 
   // Invoice detail modal for active queries
   const [selectedInvoice, setSelectedInvoice] = useState(null);
@@ -79,6 +83,7 @@ export const AdminPage = () => {
       if (!type || type === 'staff' || type === 'all') setStaffList(storageService.getStaff());
       if (!type || type === 'locations' || type === 'all') setLocations(storageService.getLocations());
       if (!type || type === 'invoices' || type === 'all') setInvoices(storageService.getInvoices());
+      if (!type || ['products', 'customers', 'invoices', 'all'].includes(type)) setArchived(storageService.getArchivedRecords());
     };
     window.addEventListener('crown-data-change', handleDataChange);
     return () => window.removeEventListener('crown-data-change', handleDataChange);
@@ -102,6 +107,27 @@ export const AdminPage = () => {
   }, [loadAudit, loadDuplicates]);
 
   const activeAdmins = staffList.filter((s) => s.role === 'admin' && s.active !== false);
+
+  // --- Archived (soft-deleted) records ---
+  const archivedList = [
+    ...archived.products.map((r) => ({ collection: 'products', typeLabel: 'Product', id: r.id, label: r.name || r.id, sub: r.barcode ? `#${r.barcode}` : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
+    ...archived.customers.map((r) => ({ collection: 'customers', typeLabel: 'Customer', id: r.id, label: r.name || r.id, sub: r.whatsapp || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
+    ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer?.name || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
+  ].sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+
+  const purgeDate = (deletedAt) =>
+    deletedAt ? new Date(new Date(deletedAt).getTime() + DELETION_RETENTION_DAYS * 24 * 60 * 60 * 1000) : null;
+
+  const handleRestore = (rec) => {
+    storageService.restoreRecord(rec.collection, rec.id);
+    loadAudit();
+  };
+  const handlePurgeNow = (rec) => {
+    if (window.confirm(`Permanently delete this ${rec.typeLabel.toLowerCase()} ("${rec.label}")? This cannot be undone.`)) {
+      storageService.purgeRecord(rec.collection, rec.id);
+      loadAudit();
+    }
+  };
 
   // --- Staff management ---
 
@@ -554,6 +580,67 @@ export const AdminPage = () => {
                     <td className="py-3 px-5 text-[11px] font-bold text-slate-500 whitespace-nowrap">{d.date ? new Date(d.date).toLocaleString() : ''}</td>
                     <td className="py-3 px-5 text-[11px] font-semibold text-slate-600">
                       {d.existing ? `${d.existing.productName || ''}${d.existing.invoiceNo ? ` • ${d.existing.invoiceNo}` : ''}${d.existing.registeredBy ? ` • by ${d.existing.registeredBy}` : ''}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* Archived (soft-deleted) records — recoverable until auto-purge. Nothing is ever lost by accident. */}
+      <SectionCard
+        title="Archived Records (Recycle Bin)"
+        subtitle={`Deleted products, customers and invoices are kept here for ${DELETION_RETENTION_DAYS} days and can be restored. After that an admin session purges them for good.`}
+        icon={Archive}
+        accent="text-slate-600"
+      >
+        {archivedList.length === 0 ? (
+          <p className="p-10 text-center text-xs font-semibold text-slate-400">Nothing archived — all deletions are recoverable here.</p>
+        ) : (
+          <div className="table-container border-0 rounded-none w-full overflow-x-auto max-h-[440px] overflow-y-auto">
+            <table className="data-table w-full min-w-[820px]">
+              <thead>
+                <tr>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Type</th>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Record</th>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Archived By</th>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Archived On</th>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Auto-Purge On</th>
+                  <th className="py-3 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {archivedList.map((rec) => (
+                  <tr key={`${rec.collection}-${rec.id}`} className="hover:bg-slate-50 transition-colors">
+                    <td className="py-3 px-5">
+                      <span className="text-[10px] font-black uppercase text-slate-600 bg-slate-100 border border-slate-200 px-2 py-1 rounded-lg">{rec.typeLabel}</span>
+                    </td>
+                    <td className="py-3 px-5">
+                      <div className="font-black text-slate-900 text-xs max-w-[240px] truncate" title={rec.label}>{rec.label}</div>
+                      {rec.sub && <div className="text-[10px] font-mono font-bold text-slate-500 mt-0.5">{rec.sub}</div>}
+                    </td>
+                    <td className="py-3 px-5 text-xs font-bold text-slate-700">{rec.deletedBy || '—'}</td>
+                    <td className="py-3 px-5 text-[11px] font-bold text-slate-500 whitespace-nowrap">{rec.deletedAt ? new Date(rec.deletedAt).toLocaleString() : '—'}</td>
+                    <td className="py-3 px-5 text-[11px] font-bold text-amber-600 whitespace-nowrap">{purgeDate(rec.deletedAt) ? purgeDate(rec.deletedAt).toLocaleDateString() : '—'}</td>
+                    <td className="py-3 px-5 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleRestore(rec)}
+                          className="btn btn-outline text-xs py-1.5 px-3 font-bold text-emerald-700 border-emerald-300 hover:bg-emerald-50 flex items-center gap-1"
+                          title="Restore this record"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> Restore
+                        </button>
+                        <button
+                          onClick={() => handlePurgeNow(rec)}
+                          className="p-2 rounded-lg bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 transition-colors"
+                          title="Delete permanently now"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

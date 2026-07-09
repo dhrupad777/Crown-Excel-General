@@ -29,6 +29,10 @@ service cloud.firestore {
       return isBootstrapAdmin() || (signedIn() && exists(staffPath())
         && get(staffPath()).data.role == 'admin' && get(staffPath()).data.active == true);
     }
+    // Defense-in-depth: a required text field must be a string within a sane size, so a tampered
+    // or scripted client can't stuff oversized/wrong-typed data past the UI. Generous caps —
+    // no legitimate entry ever approaches them, so this adds zero day-to-day friction.
+    function textOk(v, maxLen) { return v is string && v.size() <= maxLen; }
 
     // ---------- Staff allowlist (doc id = lowercase email) ----------
     match /staff/{email} {
@@ -102,12 +106,12 @@ service cloud.firestore {
     // (requirement 8A). Editing/deleting is admin-only.
     match /products/{id} {
       allow read: if isStaff();
-      allow create: if isStaff();
+      allow create: if isStaff() && textOk(request.resource.data.name, 500);
       allow update, delete: if isAdmin();
     }
     match /customers/{id} {
       allow read: if isStaff();
-      allow create: if isStaff();
+      allow create: if isStaff() && textOk(request.resource.data.name, 500);
       allow delete: if isAdmin();
       // Admin edits freely; standard staff may only bump ordersCount/totalSpent on invoice commit.
       allow update: if isAdmin()
@@ -117,9 +121,12 @@ service cloud.firestore {
       allow read: if isStaff();
       allow create: if isStaff();
       allow delete: if isAdmin();
-      // Standard staff can only update/add query details to raise concerns
+      // Standard staff can only add/update the `query` (concern) field, and its note is size-capped.
       allow update: if isAdmin()
-        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query']));
+        || (isStaff()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query'])
+            && request.resource.data.query is map
+            && textOk(request.resource.data.query.note, 5000));
     }
 
     // ---------- Default deny ----------

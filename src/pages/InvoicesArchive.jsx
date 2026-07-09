@@ -14,13 +14,16 @@ import {
   AlertTriangle,
   ChevronDown,
   MapPin,
-  User
+  User,
+  Edit3,
+  Pencil
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate } from '../utils/exportUtils';
 import { useAuth } from '../context/AuthContext';
+import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
 export const InvoicesArchive = ({ initialInvoiceId }) => {
   const { isAdmin, user } = useAuth();
@@ -38,14 +41,78 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const [queryNote, setQueryNote] = useState('');
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
 
-  // Opens an invoice's detail modal from a clean state (collapsed serial groups, no query form).
+  // Invoice edit (admin, within the edit window) — secure (admin-only per rules) + traceable
+  // (every change is written to the append-only audit log with before/after).
+  const [editMode, setEditMode] = useState(false);
+  const [editForm, setEditForm] = useState(null);
+  const [editCustSearch, setEditCustSearch] = useState('');
+  const [editError, setEditError] = useState('');
+
+  // Opens an invoice's detail modal from a clean state (collapsed serial groups, no query/edit).
   const openInvoice = (inv) => {
     setSelectedInvoice(inv);
     setExpandedGroups(new Set());
     setShowQueryForm(false);
     setQueryNote('');
+    setEditMode(false);
+    setEditForm(null);
+    setEditError('');
     setShowDetailModal(true);
   };
+
+  // An invoice is editable by an admin only within EDIT_WINDOW_HOURS of when the bill was created
+  // (mirrors the serial-registration rule / client requirement 8B). After that it's read-only.
+  const isInvoiceEditable = (inv) =>
+    isAdmin && inv?.date && (Date.now() - new Date(inv.date).getTime()) < EDIT_WINDOW_HOURS * 60 * 60 * 1000;
+
+  const startEdit = (inv) => {
+    const c = inv.customer || {};
+    setEditForm({
+      customerId: c.id || '',
+      name: c.name || '',
+      whatsapp: c.whatsapp || '',
+      email: c.email || '',
+      company: c.company || '',
+      reason: ''
+    });
+    setEditCustSearch('');
+    setEditError('');
+    setEditMode(true);
+  };
+
+  const handleSaveEdit = () => {
+    if (!editForm.name.trim() || !editForm.whatsapp.trim()) {
+      setEditError('Customer name and mobile number are required.');
+      return;
+    }
+    if (!editForm.reason.trim()) {
+      setEditError('A reason for the edit is required (kept in the audit trail).');
+      return;
+    }
+    const patch = {
+      customer: {
+        id: editForm.customerId || '',
+        name: editForm.name.trim(),
+        whatsapp: editForm.whatsapp.trim(),
+        email: editForm.email.trim(),
+        company: editForm.company.trim()
+      },
+      editReason: editForm.reason.trim()
+    };
+    const saved = storageService.editInvoice(selectedInvoice.id, patch);
+    if (saved) {
+      setSelectedInvoice(saved);
+      loadInvoices();
+      setEditMode(false);
+      setEditForm(null);
+    } else {
+      setEditError('Could not save the edit. Please try again.');
+    }
+  };
+
+  const editCustResults = (editMode && editCustSearch.trim())
+    ? storageService.searchCustomers(editCustSearch).slice(0, 6)
+    : [];
 
   const toggleGroup = (key) => {
     setExpandedGroups((prev) => {
@@ -436,6 +503,14 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                             <AlertTriangle className="w-3 h-3 text-red-500" /> Query
                           </span>
                         )}
+                        {inv.editedBy && (
+                          <span
+                            className="inline-flex items-center gap-0.5 bg-amber-50 text-amber-600 border border-amber-200 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded"
+                            title={`Edited by ${inv.editedByName || inv.editedBy}${inv.editedAt ? ' on ' + new Date(inv.editedAt).toLocaleString() : ''}`}
+                          >
+                            <Pencil className="w-3 h-3" /> Edited
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] font-bold text-slate-500 mt-0.5">
                         {new Date(inv.date).toLocaleDateString()} • {new Date(inv.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -485,7 +560,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
         icon={FileText}
         maxWidth="max-w-3xl"
       >
-        {selectedInvoice && (
+        {selectedInvoice && !editMode && (
           <div className="space-y-6 font-body">
 
             {/* Printable Invoice Header Box */}
@@ -502,6 +577,12 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   <div className="font-mono text-xs font-bold text-slate-600 mt-1">
                     {new Date(selectedInvoice.date).toLocaleDateString()} • {new Date(selectedInvoice.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
+                  {selectedInvoice.editedBy && (
+                    <div className="text-[10px] font-bold text-amber-600 mt-1 flex items-center gap-1 sm:justify-end">
+                      <Pencil className="w-3 h-3" /> Edited by {selectedInvoice.editedByName || selectedInvoice.editedBy}
+                      {selectedInvoice.editedAt ? ` • ${new Date(selectedInvoice.editedAt).toLocaleString()}` : ''}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -733,6 +814,17 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                 Close
               </button>
 
+              {isInvoiceEditable(selectedInvoice) && (
+                <button
+                  type="button"
+                  onClick={() => startEdit(selectedInvoice)}
+                  className="btn btn-outline font-bold py-2.5 px-4"
+                  title={`Admins can correct the customer within ${EDIT_WINDOW_HOURS}h of billing`}
+                >
+                  <Edit3 className="w-4 h-4 text-[#2563eb]" /> Edit Invoice
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => exportInvoicesXlsx([selectedInvoice], exportFilename('xlsx', selectedInvoice.id), exportMeta())}
@@ -750,6 +842,101 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
               </button>
             </div>
 
+          </div>
+        )}
+
+        {/* --- ADMIN EDIT MODE (within the edit window; every change is audit-logged) --- */}
+        {selectedInvoice && editMode && editForm && (
+          <div className="space-y-5 font-body">
+            <div className="p-4 rounded-xl bg-blue-50 border-2 border-blue-200 flex items-start gap-3">
+              <Edit3 className="w-5 h-5 text-[#2563eb] flex-shrink-0 mt-0.5" />
+              <div className="text-xs font-semibold text-slate-700">
+                <span className="font-black text-slate-900">Editing invoice {selectedInvoice.id}.</span> You can correct the
+                customer / partner attached to this bill. Scanned items and serial numbers are locked to the warranty
+                registry and can't be changed here — for those, delete &amp; re-bill. Every change is recorded in the audit
+                trail with your name, the time, and a before/after snapshot.
+              </div>
+            </div>
+
+            {/* Swap to a different customer from the master */}
+            <div className="form-group mb-0 relative">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Swap Customer (search the database)</label>
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={editCustSearch}
+                  onChange={(e) => setEditCustSearch(e.target.value)}
+                  placeholder="Search by name, mobile, company, or email to attach a different partner..."
+                  className="input-field pl-10 py-2.5 text-sm bg-white border-slate-300 font-bold text-slate-900"
+                />
+              </div>
+              {editCustResults.length > 0 && (
+                <div className="absolute z-30 left-0 right-0 mt-1 bg-white border-2 border-slate-300 rounded-xl shadow-2xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+                  {editCustResults.map((c) => (
+                    <button
+                      type="button"
+                      key={c.id}
+                      onClick={() => {
+                        setEditForm((f) => ({ ...f, customerId: c.id, name: c.name || '', whatsapp: c.whatsapp || '', email: c.email || '', company: c.company || '' }));
+                        setEditCustSearch('');
+                      }}
+                      className="w-full text-left p-3 hover:bg-slate-50 flex items-center justify-between gap-2"
+                    >
+                      <span className="font-bold text-xs text-slate-900">{c.name}{c.company ? ` — ${c.company}` : ''}</span>
+                      <span className="font-mono text-[11px] text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">{c.whatsapp}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Editable snapshot fields */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="form-group mb-0">
+                <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Customer Name</label>
+                <input type="text" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5" required />
+              </div>
+              <div className="form-group mb-0">
+                <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Mobile Number</label>
+                <input type="text" value={editForm.whatsapp} onChange={(e) => setEditForm({ ...editForm, whatsapp: e.target.value })}
+                  className="input-field font-mono font-bold text-[#2563eb] bg-white border-slate-300 py-2.5" required />
+              </div>
+              <div className="form-group mb-0">
+                <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Email (Optional)</label>
+                <input type="email" value={editForm.email} onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                  className="input-field font-mono font-semibold text-slate-800 bg-white border-slate-300 py-2.5" />
+              </div>
+              <div className="form-group mb-0">
+                <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company (Optional)</label>
+                <input type="text" value={editForm.company} onChange={(e) => setEditForm({ ...editForm, company: e.target.value })}
+                  className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5" />
+              </div>
+            </div>
+
+            {/* Required reason — kept in the audit trail */}
+            <div className="form-group mb-0">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Reason for this edit (required — saved to the audit trail)</label>
+              <textarea value={editForm.reason} onChange={(e) => setEditForm({ ...editForm, reason: e.target.value })} rows={2}
+                placeholder="e.g. Wrong partner attached at billing — corrected to the actual buyer."
+                className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5 resize-none" />
+            </div>
+
+            {editError && (
+              <p className="text-xs font-bold text-red-500 flex items-center gap-1.5" role="alert">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {editError}
+              </p>
+            )}
+
+            <div className="flex justify-end gap-3 pt-4 border-t-2 border-slate-200">
+              <button type="button" onClick={() => { setEditMode(false); setEditForm(null); setEditError(''); }} className="btn btn-outline font-bold px-5 py-2.5">
+                Cancel
+              </button>
+              <button type="button" onClick={handleSaveEdit} className="btn btn-primary font-bold px-6 py-2.5 shadow-md">
+                <CheckCircle2 className="w-4 h-4" /> Save &amp; Log Change
+              </button>
+            </div>
           </div>
         )}
       </Modal>

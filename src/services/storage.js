@@ -3,7 +3,7 @@
 // Domain: Electronics (Laptops, Mobile Phones, Tablets, Audio, Wearables & Accessories)
 
 import { firebaseService, serverTimestamp } from './firebase';
-import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS } from '../config/appConfig';
+import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'crown_excel_products_v2',
@@ -194,6 +194,10 @@ class StorageService {
       this._setItem(STORAGE_KEYS.LOCATIONS, cloudLocations || []);
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'locations' } }));
     });
+
+    // Opportunistic hard-purge of records archived past the retention window. Delayed so the
+    // initial cloud snapshots settle first; no-op unless this is an admin session (rules).
+    setTimeout(() => this.purgeExpiredDeletions(), 8000);
   }
 
   stopCloudSync() {
@@ -203,15 +207,24 @@ class StorageService {
     this._currentUser = null;
   }
 
-  // --- PRODUCTS ---
-  getProducts() {
+  // Raw list read INCLUDING soft-deleted (archived) records. Used by every mutation so that
+  // writing the list back never drops archived rows; the public getters below hide them.
+  _readRaw(key) {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
+      const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : [];
     } catch (e) {
-      console.error('Error fetching products:', e);
       return [];
     }
+  }
+
+  // --- PRODUCTS ---
+  getProducts() {
+    return this._readRaw(STORAGE_KEYS.PRODUCTS).filter((p) => !p.deleted);
+  }
+
+  getArchivedProducts() {
+    return this._readRaw(STORAGE_KEYS.PRODUCTS).filter((p) => p.deleted);
   }
 
   getProductByBarcode(barcode) {
@@ -225,7 +238,7 @@ class StorageService {
   }
 
   saveProduct(product) {
-    const products = this.getProducts();
+    const products = this._readRaw(STORAGE_KEYS.PRODUCTS);
     let updated;
     const isNew = !product.id || !products.some(p => p.id === product.id);
     const savedProd = {
@@ -251,23 +264,103 @@ class StorageService {
   }
 
   deleteProduct(id) {
-    const products = this.getProducts().filter(p => p.id !== id);
-    if (!this._setItem(STORAGE_KEYS.PRODUCTS, products)) return false;
-    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
+    return this._archive(STORAGE_KEYS.PRODUCTS, 'products', id);
+  }
 
-    // Delete from live Firebase cloud
-    firebaseService.deleteFromCloud('products', id);
+  // --- SOFT DELETE / ARCHIVE / RESTORE / PURGE (so nothing is ever lost by accident) ---
+
+  _collectionKey(collection) {
+    return { products: STORAGE_KEYS.PRODUCTS, customers: STORAGE_KEYS.CUSTOMERS, invoices: STORAGE_KEYS.INVOICES }[collection];
+  }
+
+  // Flags a record as archived (recoverable) instead of destroying it. It vanishes from every
+  // normal view immediately; an admin can restore it, and it's purged for good only after the
+  // retention window. Writing back the RAW list keeps other archived rows intact.
+  _archive(key, collection, id) {
+    const user = this._currentUser || {};
+    const all = this._readRaw(key);
+    const before = all.find((r) => r.id === id);
+    if (!before) return false;
+    const archived = {
+      ...before,
+      deleted: true,
+      deletedBy: user.email || '',
+      deletedByName: user.displayName || '',
+      deletedAt: new Date().toISOString()
+    };
+    if (!this._setItem(key, all.map((r) => (r.id === id ? archived : r)))) return false;
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
+    firebaseService.saveToCloud(collection, id, archived); // an admin update per rules — not a hard delete
+    this.appendAudit(`${collection.replace(/s$/, '')}.archive`, before, archived, { entity: collection, entityId: id });
+    return true;
+  }
+
+  getArchivedRecords() {
+    return {
+      products: this.getArchivedProducts(),
+      customers: this._readRaw(STORAGE_KEYS.CUSTOMERS).filter((c) => c.deleted),
+      invoices: this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted)
+    };
+  }
+
+  restoreRecord(collection, id) {
+    const key = this._collectionKey(collection);
+    if (!key) return false;
+    const user = this._currentUser || {};
+    const all = this._readRaw(key);
+    const before = all.find((r) => r.id === id);
+    if (!before) return false;
+    // Set deleted:false (not delete the field) so a Firestore merge write actually clears it.
+    const restored = { ...before, deleted: false, deletedAt: null, restoredBy: user.email || '', restoredAt: new Date().toISOString() };
+    if (!this._setItem(key, all.map((r) => (r.id === id ? restored : r)))) return false;
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
+    firebaseService.saveToCloud(collection, id, restored);
+    this.appendAudit(`${collection.replace(/s$/, '')}.restore`, before, restored, { entity: collection, entityId: id });
+    return true;
+  }
+
+  // Permanently removes records archived longer than the retention window. Deletes require admin
+  // (per rules), so this only does anything in an admin session — a best-effort stand-in for a
+  // backend cron (admins sign in regularly). Also usable as an immediate "purge now" per record.
+  purgeExpiredDeletions() {
+    if (this._currentUser?.role !== 'admin') return 0;
+    const cutoff = Date.now() - DELETION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let purged = 0;
+    ['products', 'customers', 'invoices'].forEach((collection) => {
+      const key = this._collectionKey(collection);
+      const all = this._readRaw(key);
+      const isExpired = (r) => r.deleted && r.deletedAt && new Date(r.deletedAt).getTime() < cutoff;
+      const expired = all.filter(isExpired);
+      if (expired.length === 0) return;
+      if (this._setItem(key, all.filter((r) => !isExpired(r)))) {
+        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
+      }
+      expired.forEach((r) => {
+        firebaseService.deleteFromCloud(collection, r.id);
+        this.appendAudit(`${collection.replace(/s$/, '')}.purge`, r, null, { entity: collection, entityId: r.id });
+        purged += 1;
+      });
+    });
+    return purged;
+  }
+
+  // Hard-delete one archived record immediately (admin "delete permanently now").
+  purgeRecord(collection, id) {
+    if (this._currentUser?.role !== 'admin') return false;
+    const key = this._collectionKey(collection);
+    if (!key) return false;
+    const all = this._readRaw(key);
+    const before = all.find((r) => r.id === id);
+    if (!this._setItem(key, all.filter((r) => r.id !== id))) return false;
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
+    firebaseService.deleteFromCloud(collection, id);
+    this.appendAudit(`${collection.replace(/s$/, '')}.purge`, before, null, { entity: collection, entityId: id });
     return true;
   }
 
   // --- CUSTOMERS ---
   getCustomers() {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.CUSTOMERS);
-      return data ? JSON.parse(data) : [];
-    } catch (e) {
-      return [];
-    }
+    return this._readRaw(STORAGE_KEYS.CUSTOMERS).filter((c) => !c.deleted);
   }
 
   searchCustomers(query) {
@@ -282,7 +375,7 @@ class StorageService {
   }
 
   saveCustomer(customer) {
-    const customers = this.getCustomers();
+    const customers = this._readRaw(STORAGE_KEYS.CUSTOMERS);
     let updated;
     const isNew = !customer.id || !customers.some(c => c.id === customer.id);
     const savedCust = {
@@ -308,23 +401,12 @@ class StorageService {
   }
 
   deleteCustomer(id) {
-    const customers = this.getCustomers().filter(c => c.id !== id);
-    if (!this._setItem(STORAGE_KEYS.CUSTOMERS, customers)) return false;
-    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
-
-    // Delete from live Firebase cloud
-    firebaseService.deleteFromCloud('customers', id);
-    return true;
+    return this._archive(STORAGE_KEYS.CUSTOMERS, 'customers', id);
   }
 
   // --- INVOICES ---
   getInvoices() {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.INVOICES);
-      return data ? JSON.parse(data) : [];
-    } catch (e) {
-      return [];
-    }
+    return this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => !i.deleted);
   }
 
   getInvoiceById(id) {
@@ -410,7 +492,7 @@ class StorageService {
   }
 
   saveInvoice(invoice) {
-    const invoices = this.getInvoices();
+    const invoices = this._readRaw(STORAGE_KEYS.INVOICES);
     let updated;
     const isNew = !invoice.id || !invoices.some(i => i.id === invoice.id);
     const me = this._currentUser || {};
@@ -438,7 +520,7 @@ class StorageService {
       
       // Update customer stats if matched
       if (savedInv.customer && savedInv.customer.id) {
-        const customers = this.getCustomers();
+        const customers = this._readRaw(STORAGE_KEYS.CUSTOMERS);
         const updatedCusts = customers.map(c => {
           if (c.id === savedInv.customer.id) {
             const newCustObj = {
@@ -479,14 +561,32 @@ class StorageService {
     return savedInv;
   }
 
-  deleteInvoice(id) {
-    const invoices = this.getInvoices().filter(inv => inv.id !== id);
-    if (!this._setItem(STORAGE_KEYS.INVOICES, invoices)) return false;
-    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+  // Admin correction of a finalized bill. Merges `patch` into the existing invoice, stamps who
+  // edited it and when, and writes an append-only audit entry with the full before/after — so
+  // every change to a sale record is traceable and can't be erased. Security is enforced by
+  // firestore.rules (only admins may update an invoice's non-query fields). Line items / serials
+  // stay out of `patch` on purpose: they're coupled to the create-only warranty registry, so a
+  // wrong bill is corrected by delete + re-bill, and serial typos via the registry.
+  editInvoice(invoiceId, patch) {
+    const before = this.getInvoiceById(invoiceId);
+    if (!before) return null;
+    const user = this._currentUser || {};
+    const updated = {
+      ...before,
+      ...patch,
+      editedBy: user.email || '',
+      editedByName: user.displayName || '',
+      editedAt: new Date().toISOString()
+    };
+    const saved = this.saveInvoice(updated); // existing id → updates in place, no re-stamp of biller
+    if (saved) {
+      this.appendAudit('invoice.update', before, saved, { entity: 'invoice', entityId: invoiceId });
+    }
+    return saved;
+  }
 
-    // Delete from live Firebase cloud
-    firebaseService.deleteFromCloud('invoices', id);
-    return true;
+  deleteInvoice(id) {
+    return this._archive(STORAGE_KEYS.INVOICES, 'invoices', id);
   }
 
   // --- SERIAL REGISTRY (warranty registrations; cloud-authoritative) ---
@@ -851,10 +951,12 @@ class StorageService {
   }
 
   exportAllData() {
+    // Raw reads so a full backup includes archived (soft-deleted) records too — a backup should
+    // never quietly drop data that's still recoverable in the app.
     return JSON.stringify({
-      products: this.getProducts(),
-      customers: this.getCustomers(),
-      invoices: this.getInvoices(),
+      products: this._readRaw(STORAGE_KEYS.PRODUCTS),
+      customers: this._readRaw(STORAGE_KEYS.CUSTOMERS),
+      invoices: this._readRaw(STORAGE_KEYS.INVOICES),
       serials: this.getSerials(),
       staff: this.getStaff(),
       locations: this.getLocations(),

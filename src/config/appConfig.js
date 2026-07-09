@@ -29,3 +29,13 @@ export const DEFAULT_LOCATION = {
   code: 'MAIN',
   active: true,
 };
+
+// App Check (invisible reCAPTCHA v3) site key. Leave empty to keep App Check OFF (the app runs
+// exactly as before). To turn on anti-abuse protection: create a reCAPTCHA v3 key + register the
+// app for App Check in the Firebase console, paste the SITE key here, deploy, verify tokens are
+// flowing (App Check metrics), and only THEN switch enforcement on. See docs/SECURITY.md.
+export const APP_CHECK_SITE_KEY = '';
+
+// Soft-deleted (archived) records are kept this many days so nothing is ever lost by accident;
+// after that an admin session purges them permanently. Restorable any time before then.
+export const DELETION_RETENTION_DAYS = 90;

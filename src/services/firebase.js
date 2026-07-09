@@ -1,5 +1,7 @@
 import { initializeApp } from 'firebase/app';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import { getAnalytics } from 'firebase/analytics';
+import { APP_CHECK_SITE_KEY } from '../config/appConfig';
 import {
   getFirestore,
   initializeFirestore,
@@ -84,7 +86,28 @@ class FirebaseService {
       }
 
       this.app = initializeApp(this.config);
-      
+
+      // App Check (invisible reCAPTCHA v3) — attests every request comes from the genuine app,
+      // blocking bots/scripts from abusing Firestore or the login. No user interaction (v3 is
+      // invisible), so it adds zero friction. Inert until a site key is configured, so it never
+      // breaks dev or an un-provisioned project. See docs/SECURITY.md for the rollout order.
+      try {
+        if (APP_CHECK_SITE_KEY) {
+          if (import.meta.env?.DEV) {
+            // Allows localhost to obtain App Check tokens during development (register the
+            // printed debug token in the console → App Check → Debug tokens).
+            self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+          }
+          initializeAppCheck(this.app, {
+            provider: new ReCaptchaV3Provider(APP_CHECK_SITE_KEY),
+            isTokenAutoRefreshEnabled: true
+          });
+          console.log('🛡️ Firebase App Check active (invisible reCAPTCHA v3).');
+        }
+      } catch (acErr) {
+        console.warn('App Check initialization skipped:', acErr.message);
+      }
+
       try {
         this.analytics = getAnalytics(this.app);
       } catch (err) {
@@ -113,6 +136,20 @@ class FirebaseService {
 
   // --- CLOUD CRUD & SYNCHRONIZATION ENGINE ---
 
+  // Surfaces a cloud-write failure so it can never be silently lost. Transient errors are
+  // auto-retried by Firestore's offline queue, so we DON'T alarm on those (that would be daily
+  // friction) — only permanent failures (permission-denied, invalid data, quota) raise the flag.
+  _reportSyncError(collectionName, id, err) {
+    const code = String(err?.code || '');
+    console.warn(`Failed to sync [${collectionName}/${id}]:`, err?.message || err);
+    const transient = ['unavailable', 'deadline-exceeded', 'cancelled', 'aborted', 'network'].some((c) => code.includes(c));
+    if (!transient) {
+      window.dispatchEvent(new CustomEvent('crown-sync-error', {
+        detail: { collection: collectionName, id, code, message: err?.message || String(err) }
+      }));
+    }
+  }
+
   async saveToCloud(collectionName, id, data) {
     if (!this.isInitialized || !this.db) return false;
     try {
@@ -120,7 +157,7 @@ class FirebaseService {
       await setDoc(docRef, data, { merge: true });
       return true;
     } catch (err) {
-      console.warn(`Failed to sync [${collectionName}/${id}] to Firebase cloud:`, err.message);
+      this._reportSyncError(collectionName, id, err);
       return false;
     }
   }
@@ -132,7 +169,7 @@ class FirebaseService {
       await deleteDoc(docRef);
       return true;
     } catch (err) {
-      console.warn(`Failed to delete [${collectionName}/${id}] from Firebase cloud:`, err.message);
+      this._reportSyncError(collectionName, id, err);
       return false;
     }
   }

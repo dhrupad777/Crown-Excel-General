@@ -15,7 +15,8 @@ import {
   ShieldCheck,
   ScanLine,
   UserCog,
-  LogOut
+  LogOut,
+  AlertTriangle
 } from 'lucide-react';
 import { audioService } from '../services/audio';
 import { storageService } from '../services/storage';
@@ -27,6 +28,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
   const [soundEnabled, setSoundEnabled] = useState(audioService.enabled);
   const [stats, setStats] = useState(storageService.getDashboardStats());
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [syncIssue, setSyncIssue] = useState(null);
 
   useEffect(() => {
     const handleNetwork = (e) => setIsOnline(e.detail?.online ?? navigator.onLine);
@@ -37,15 +39,23 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     const handleDataChange = () => setStats(storageService.getDashboardStats());
     window.addEventListener('crown-data-change', handleDataChange);
 
-    // Refresh stats & clock
+    // A cloud/local save failed permanently (not just offline) — surface it so it isn't lost.
+    const handleSyncError = (e) => setSyncIssue({ message: e.detail?.message || 'A save did not reach the cloud.', at: Date.now() });
+    window.addEventListener('crown-sync-error', handleSyncError);
+    window.addEventListener('crown-storage-error', handleSyncError);
+
+    // Refresh stats & clock; self-clear a stale sync warning after 30s of quiet.
     const interval = setInterval(() => {
       setStats(storageService.getDashboardStats());
       setCurrentTime(new Date());
+      setSyncIssue((cur) => (cur && Date.now() - cur.at > 30000 ? null : cur));
     }, 1000);
 
     return () => {
       window.removeEventListener('network-status-change', handleNetwork);
       window.removeEventListener('crown-data-change', handleDataChange);
+      window.removeEventListener('crown-sync-error', handleSyncError);
+      window.removeEventListener('crown-storage-error', handleSyncError);
       clearInterval(interval);
     };
   }, []);
@@ -183,6 +193,15 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
 
         {/* Sidebar Bottom Controls */}
         <div className="p-4 border-t-2 border-slate-200 bg-slate-50 flex flex-col gap-2">
+
+          {/* A save that didn't reach the cloud — surfaced so it can never be silently lost.
+              Only shows on a real (non-transient) failure and clears itself once things recover. */}
+          {syncIssue && (
+            <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-50 border-2 border-red-300 text-[11px] font-black text-red-600" title={syncIssue.message} role="alert">
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="truncate">A save didn't sync — check connection</span>
+            </div>
+          )}
 
           {/* Offline / Sync Status */}
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-white border-2 border-slate-200 text-xs">
