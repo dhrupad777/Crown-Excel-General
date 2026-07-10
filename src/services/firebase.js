@@ -248,6 +248,31 @@ class FirebaseService {
     }
   }
 
+  // Atomically hands out the next number in a shared sequence (counters/{counterId}.next).
+  // Invoice numbers MUST come from here: a per-browser counter lets two terminals mint the same
+  // number, and because saveToCloud is a merge-write the second bill would land on top of the
+  // first (or be denied as a non-admin update) and disappear. The transaction serialises that.
+  // `floor` is the highest number the caller already knows to be in use, so the very first
+  // allocation (empty counter doc) can't hand back a number that an existing bill already owns,
+  // and a stale counter can only ever heal upward. Returns null when offline — transactions read
+  // from the server and never queue.
+  async allocateSequentialNumber(counterId, floor) {
+    if (!this.isInitialized || !this.db) return null;
+    try {
+      return await runTransaction(this.db, async (tx) => {
+        const ref = doc(this.db, 'counters', counterId);
+        const snap = await tx.get(ref);
+        const stored = snap.exists() && Number.isFinite(snap.data().next) ? snap.data().next : 0;
+        const next = Math.max(stored, floor + 1);
+        tx.set(ref, { next: next + 1 }, { merge: true });
+        return next;
+      });
+    } catch (err) {
+      console.warn(`Failed to allocate number [${counterId}]:`, err?.message || err);
+      return null;
+    }
+  }
+
   // Like saveToCloud but AWAITS and THROWS on failure. Use for writes where the cloud is the
   // source of truth (serial edits, staff, locations) and the caller must surface the error —
   // saveToCloud's silent-swallow behavior is only appropriate for background mirroring.

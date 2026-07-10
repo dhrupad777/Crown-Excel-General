@@ -129,12 +129,18 @@ export const SerialRegistry = () => {
     return `Crown_Excel_Serial_Registrations_${datePart}.${ext}`;
   };
 
-  const handleExport = (kind) => {
+  const handleExport = async (kind) => {
     if (filteredSerials.length === 0) {
       alert('No registrations match the current filters — nothing to export.');
       return;
     }
-    if (kind === 'xlsx') exportSerialsXlsx(filteredSerials, exportFilename('xlsx'));
+    if (kind === 'xlsx') {
+      try {
+        await exportSerialsXlsx(filteredSerials, exportFilename('xlsx'));
+      } catch (err) {
+        alert(`Could not build the Excel file: ${err.message}`);
+      }
+    }
     if (kind === 'csv') exportSerialsCsv(filteredSerials, exportFilename('csv'));
     if (kind === 'pdf') exportSerialsPdf(filteredSerials, exportFilename('pdf'), exportSubtitle());
   };

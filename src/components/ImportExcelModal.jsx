@@ -44,7 +44,7 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
       setRows(parsed);
       setFileName(file.name);
     } catch (err) {
-      setParseError(`Could not read that file (${err.message}). Use .xlsx, .xls, or .csv.`);
+      setParseError(`Could not read that file (${err.message}). Use .xlsx or .csv — if it's an old .xls, open it in Excel and "Save As" .xlsx.`);
       setRows(null);
     }
     e.target.value = '';
@@ -58,11 +58,16 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
     setBusy(false);
   };
 
-  const handleDownloadTemplate = () => {
-    exportToXlsx({
-      filename: `Crown_Excel_${entityLabel.replace(/\s+/g, '_')}_Template.xlsx`,
-      sheets: [{ name: 'Template', headers: templateHeaders, rows: [] }]
-    });
+  const handleDownloadTemplate = async () => {
+    try {
+      await exportToXlsx({
+        filename: `Crown_Excel_${entityLabel.replace(/\s+/g, '_')}_Template.xlsx`,
+        subtitle: `Blank import template — ${entityLabel}`,
+        sheets: [{ name: 'Template', headers: templateHeaders, rows: [] }]
+      });
+    } catch (err) {
+      alert(`Could not build the template: ${err.message}`);
+    }
   };
 
   const handleDownloadErrors = () => {
@@ -81,7 +86,7 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
       isOpen={isOpen}
       onClose={handleClose}
       title={`Bulk Import — ${entityLabel}`}
-      subtitle="Upload an Excel (.xlsx/.xls) or CSV file. The first sheet's header row is matched automatically."
+      subtitle="Upload an Excel (.xlsx) or CSV file. The first sheet's header row is matched automatically."
       icon={FileSpreadsheet}
       maxWidth="max-w-2xl"
     >
@@ -106,7 +111,7 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xls,.csv"
+            accept=".xlsx,.csv"
             onChange={handleFile}
             className="hidden"
           />

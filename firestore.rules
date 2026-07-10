@@ -129,6 +129,18 @@ service cloud.firestore {
             && textOk(request.resource.data.query.note, 5000));
     }
 
+    // Shared sequence counters (currently only `invoices`). Any staff member may draw the next
+    // number, but the sequence may only ever move forward — a rewind would re-issue a number
+    // that already belongs to a finalized bill.
+    match /counters/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.next is int;
+      allow update: if isStaff()
+        && request.resource.data.next is int
+        && request.resource.data.next > resource.data.next;
+      allow delete: if false;
+    }
+
     // ---------- Default deny ----------
     match /{document=**} {
       allow read, write: if false;

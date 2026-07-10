@@ -2,15 +2,114 @@
 // Header matching is tolerant (case/spacing/synonyms) so files exported from this app, the
 // client's old sheets, or a blank template all round-trip without manual renaming.
 
-import * as XLSX from 'xlsx';
 import { storageService } from '../services/storage';
 
+// Coerces one ExcelJS cell value to plain text. Cells aren't always primitives: formulas arrive
+// as { result }, styled text as { richText }, links as { hyperlink, text }.
+const cellText = (v) => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map((r) => r.text).join('');
+    if (v.text !== undefined) return String(v.text);
+    if (v.result !== undefined) return String(v.result);
+    if (v.hyperlink) return String(v.hyperlink);
+    return '';
+  }
+  return String(v);
+};
+
+// Minimal RFC-4180 CSV reader: handles quoted fields, escaped quotes ("") and embedded
+// newlines/commas. ExcelJS only reads CSV through Node streams, so the browser needs this.
+const parseCsv = (text) => {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  const src = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"') {
+        if (src[i + 1] === '"') { field += '"'; i += 1; } else { quoted = false; }
+      } else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else field += c;
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+};
+
+// Turns a header row + body rows into the { header: value } objects the importers expect
+// (missing cells default to '', matching the previous sheet_to_json({ defval: '' }) behaviour).
+const toObjects = (headers, bodyRows) => {
+  const keys = headers.map((h) => cellText(h).trim());
+  return bodyRows
+    .filter((cells) => cells.some((c) => cellText(c).trim() !== ''))
+    .map((cells) => {
+      const obj = {};
+      keys.forEach((key, idx) => {
+        if (key) obj[key] = cellText(cells[idx]).trim();
+      });
+      return obj;
+    });
+};
+
+// Counts DISTINCT non-empty values, not just non-empty cells: a merged cell reads back as its
+// value repeated across every column it spans, so the branded title row would otherwise look
+// exactly as wide as the header row. A title has one distinct value; a header row has many.
+const distinctCount = (cells) => {
+  const seen = new Set();
+  for (const c of cells) {
+    const t = cellText(c).trim();
+    if (t) seen.add(t);
+  }
+  return seen.size;
+};
+
+// The header row isn't always row 1. This app's own exports (and its blank template) put a merged
+// branded title on rows 1-3 and the real headers on row 4, so a file exported from here has to be
+// re-importable. Ties go to the earliest row, which is the header rather than a data row below it.
+const findHeaderIndex = (rows) => {
+  let best = 0;
+  let bestCount = 0;
+  for (let i = 0; i < Math.min(rows.length, 10); i += 1) {
+    const count = distinctCount(rows[i]);
+    if (count > bestCount) { best = i; bestCount = count; }
+  }
+  return bestCount >= 2 ? best : 0;
+};
+
+const rowsToObjects = (rows) => {
+  if (rows.length === 0) return [];
+  const h = findHeaderIndex(rows);
+  return toObjects(rows[h], rows.slice(h + 1));
+};
+
+// Reads the first sheet of an .xlsx (or a .csv) into row objects keyed by header.
+// NOTE: legacy .xls (pre-2007 binary) is not supported — resave those as .xlsx or .csv.
 export const parseWorkbookFile = async (file) => {
-  const buffer = await file.arrayBuffer();
-  const wb = XLSX.read(buffer, { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
+  if (/\.csv$/i.test(file.name)) {
+    return rowsToObjects(parseCsv(await file.text()));
+  }
+
+  const mod = await import('exceljs');
+  const ExcelJS = mod.default || mod;
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+
+  const ws = wb.worksheets[0];
   if (!ws) return [];
-  return XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+  // ExcelJS row/cell values are 1-indexed with a hole at 0 — slice it off.
+  const asCells = (r) => (Array.isArray(r?.values) ? r.values.slice(1) : []);
+
+  const rows = [];
+  ws.eachRow({ includeEmpty: true }, (row) => rows.push(asCells(row)));
+  return rowsToObjects(rows);
 };
 
 const normalizeHeader = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '');

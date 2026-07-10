@@ -21,7 +21,7 @@ import {
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
-import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate } from '../utils/exportUtils';
+import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate, countInvoiceUnits } from '../utils/exportUtils';
 import { useAuth } from '../context/AuthContext';
 import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
@@ -40,6 +40,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const [showQueryForm, setShowQueryForm] = useState(false);
   const [queryNote, setQueryNote] = useState('');
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+  const [exporting, setExporting] = useState(false);
 
   // Invoice edit (admin, within the edit window) — secure (admin-only per rules) + traceable
   // (every change is written to the append-only audit log with before/after).
@@ -183,38 +184,52 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   // (also used elsewhere for serial-number warranty lookups), date-range tabs stay local to this page.
   const searchMatchIds = new Set(storageService.searchInvoices(searchQuery).map(inv => inv.id));
 
-  const filteredInvoices = invoices.filter((inv) => {
-    // 1. Search Query
-    if (searchQuery.trim() && !searchMatchIds.has(inv.id)) return false;
-
-    // 2. Date Filter
-    if (dateFilter !== 'all') {
-      const invDate = new Date(inv.date);
-      const now = new Date();
-      if (dateFilter === 'today') {
-        return invDate.toDateString() === now.toDateString();
-      }
-      if (dateFilter === 'week') {
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        return invDate >= weekAgo;
-      }
-      if (dateFilter === 'month') {
-        return invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear();
-      }
-      if (dateFilter === 'custom') {
-        if (!customRangeStart || !customRangeEnd) return true;
-        // The end date arrives as a bare calendar day (midnight) — clamp it to the end of that
-        // day before comparing, otherwise every invoice with a real time-of-day later than
-        // midnight would be wrongly excluded (picking "today" as both ends would show 0 results).
-        const start = new Date(customRangeStart.getFullYear(), customRangeStart.getMonth(), customRangeStart.getDate(), 0, 0, 0, 0);
-        const end = new Date(customRangeEnd.getFullYear(), customRangeEnd.getMonth(), customRangeEnd.getDate(), 23, 59, 59, 999);
-        return invDate >= start && invDate <= end;
-      }
-      return true;
+  const passesDateFilter = (inv) => {
+    if (dateFilter === 'all') return true;
+    const invDate = new Date(inv.date);
+    const now = new Date();
+    if (dateFilter === 'today') {
+      return invDate.toDateString() === now.toDateString();
     }
-
+    if (dateFilter === 'week') {
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return invDate >= weekAgo;
+    }
+    if (dateFilter === 'month') {
+      return invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear();
+    }
+    if (dateFilter === 'custom') {
+      if (!customRangeStart || !customRangeEnd) return true;
+      // The end date arrives as a bare calendar day (midnight) — clamp it to the end of that
+      // day before comparing, otherwise every invoice with a real time-of-day later than
+      // midnight would be wrongly excluded (picking "today" as both ends would show 0 results).
+      const start = new Date(customRangeStart.getFullYear(), customRangeStart.getMonth(), customRangeStart.getDate(), 0, 0, 0, 0);
+      const end = new Date(customRangeEnd.getFullYear(), customRangeEnd.getMonth(), customRangeEnd.getDate(), 23, 59, 59, 999);
+      return invDate >= start && invDate <= end;
+    }
     return true;
-  });
+  };
+
+  const filteredInvoices = invoices.filter(
+    (inv) => (!searchQuery.trim() || searchMatchIds.has(inv.id)) && passesDateFilter(inv)
+  );
+
+  // storageService.searchInvoices only sees active bills, so voided ones need their own (simpler)
+  // text match — enough to keep a searched export honest.
+  const archivedMatchesSearch = (inv) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return `${inv.id} ${inv.customer?.name || ''} ${inv.customer?.whatsapp || ''}`.toLowerCase().includes(q)
+      || (inv.items || []).some((i) => `${i.name || ''} ${i.imei || ''}`.toLowerCase().includes(q));
+  };
+
+  // Exports carry the voided bills too — a bill that vanishes from the record is exactly what an
+  // audit flags. They're tagged "Archived (Voided)" in the workbook's Record Status column.
+  const exportInvoices = storageService
+    .getInvoicesIncludingArchived()
+    .filter((inv) => (inv.deleted
+      ? passesDateFilter(inv) && archivedMatchesSearch(inv)
+      : filteredInvoices.some((f) => f.id === inv.id)));
 
   // Item-level matches for the "Matching Items" view — see storageService.searchInvoiceItems.
   // Deliberately not scoped to the active date-filter tab: it answers "show me every sale
@@ -222,26 +237,38 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const matchingItems = searchQuery.trim() ? storageService.searchInvoiceItems(searchQuery) : [];
 
   // Totals of Filtered Records
-  const totalFilteredItems = filteredInvoices.reduce((acc, inv) => acc + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
+  const totalFilteredItems = filteredInvoices.reduce((acc, inv) => acc + countInvoiceUnits(inv), 0);
   const openQueryCount = filteredInvoices.filter((i) => i.query && !i.query.resolved).length;
 
   // Handle Delete
+  // Voiding keeps the bill and its number in the record; a reason is mandatory, because "why was
+  // this invoice cancelled" is the first question asked about any voided document.
   const handleDeleteInvoice = (id, e) => {
     e.stopPropagation();
-    if (window.confirm("Are you sure you want to delete this invoice record?")) {
-      storageService.deleteInvoice(id);
-      loadInvoices();
-      if (selectedInvoice && selectedInvoice.id === id) {
-        setShowDetailModal(false);
-      }
+    const reason = window.prompt(
+      `Void invoice ${id}?\n\nThe bill keeps its number and stays in the record (marked "Voided") — it is not erased.\n\nReason for voiding (required):`
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      alert('A reason is required to void an invoice.');
+      return;
+    }
+    storageService.deleteInvoice(id, reason.trim());
+    loadInvoices();
+    if (selectedInvoice && selectedInvoice.id === id) {
+      setShowDetailModal(false);
     }
   };
 
   // Export metadata + filename shared by every invoice export (bulk and per-invoice).
+  // `serialLookup` lets the workbook cross-reference each serial against the warranty registry;
+  // `generatedBy` records who downloaded it on the Report Info sheet.
   const exportMeta = () => ({
     dateFilter: (dateFilter === 'custom' && customRangeStart && customRangeEnd)
       ? `${formatLocalDate(customRangeStart)} to ${formatLocalDate(customRangeEnd)}`
-      : (dateFilter === 'all' ? 'All records' : dateFilter)
+      : (dateFilter === 'all' ? 'All records' : dateFilter),
+    serialLookup: (serial) => storageService.findSerial(serial),
+    generatedBy: storageService.getCurrentUser()
   });
   const exportFilename = (ext, tag) => {
     const datePart = (dateFilter === 'custom' && customRangeStart && customRangeEnd)
@@ -250,14 +277,20 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     return `Crown_Excel_Invoices${tag ? '_' + tag : ''}_${datePart}.${ext}`;
   };
 
-  // Full Excel workbook (Invoice Summary + Serial Details + Report Info) for the filtered set.
-  const handleExportExcel = () => {
-    if (filteredInvoices.length === 0) { alert("No invoices to export."); return; }
-    exportInvoicesXlsx(filteredInvoices, exportFilename('xlsx'), exportMeta());
+  // Styled 4-sheet workbook for the filtered set. Async: ExcelJS is lazy-loaded on first use.
+  const handleExportExcel = async () => {
+    if (exportInvoices.length === 0) { alert("No invoices to export."); return; }
+    setExporting(true);
+    try {
+      await exportInvoicesXlsx(exportInvoices, exportFilename('xlsx'), exportMeta());
+    } catch (err) {
+      alert(`Could not build the Excel file: ${err.message}`);
+    }
+    setExporting(false);
   };
   const handleExportCSV = () => {
-    if (filteredInvoices.length === 0) { alert("No invoices to export."); return; }
-    exportInvoicesCsv(filteredInvoices, exportFilename('csv'), exportMeta());
+    if (exportInvoices.length === 0) { alert("No invoices to export."); return; }
+    exportInvoicesCsv(exportInvoices, exportFilename('csv'), exportMeta());
   };
 
   // Print Invoice Function
@@ -306,9 +339,10 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
         <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 flex flex-col justify-center gap-2 shadow-sm border-l-4 border-l-slate-700">
           <button
             onClick={handleExportExcel}
-            className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10"
+            disabled={exporting}
+            className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10 disabled:opacity-60"
           >
-            <FileSpreadsheet className="w-4 h-4" /> Export Excel
+            <FileSpreadsheet className="w-4 h-4" /> {exporting ? 'Building…' : 'Export Excel'}
           </button>
           <button
             onClick={handleExportCSV}
@@ -827,10 +861,23 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
               <button
                 type="button"
-                onClick={() => exportInvoicesXlsx([selectedInvoice], exportFilename('xlsx', selectedInvoice.id), exportMeta())}
-                className="btn btn-outline font-bold py-2.5 px-4"
+                disabled={exporting}
+                onClick={async () => {
+                  setExporting(true);
+                  try {
+                    await exportInvoicesXlsx(
+                      [selectedInvoice],
+                      exportFilename('xlsx', selectedInvoice.id),
+                      { ...exportMeta(), scope: `Single bill (${selectedInvoice.id})` }
+                    );
+                  } catch (err) {
+                    alert(`Could not build the Excel file: ${err.message}`);
+                  }
+                  setExporting(false);
+                }}
+                className="btn btn-outline font-bold py-2.5 px-4 disabled:opacity-60"
               >
-                <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Download Excel
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> {exporting ? 'Building…' : 'Download Excel'}
               </button>
 
               <button

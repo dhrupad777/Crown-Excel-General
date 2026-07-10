@@ -118,11 +118,21 @@ export const CustomersManager = () => {
     c.ordersCount || 0
   ]);
 
-  const handleExport = (kind) => {
+  const handleExport = async (kind) => {
     if (customers.length === 0) return;
     const base = `Crown_Excel_Customers_${formatLocalDate(new Date())}`;
     if (kind === 'csv') exportToCsv({ filename: `${base}.csv`, headers: exportHeaders, rows: exportRows() });
-    if (kind === 'xlsx') exportToXlsx({ filename: `${base}.xlsx`, sheets: [{ name: 'Customers', headers: exportHeaders, rows: exportRows() }] });
+    if (kind === 'xlsx') {
+      try {
+        await exportToXlsx({
+          filename: `${base}.xlsx`,
+          subtitle: `Customer Master · ${customers.length} customers · Generated ${new Date().toLocaleString()}`,
+          sheets: [{ name: 'Customers', headers: exportHeaders, rows: exportRows() }]
+        });
+      } catch (err) {
+        alert(`Could not build the Excel file: ${err.message}`);
+      }
+    }
     if (kind === 'pdf') exportToPdf({
       filename: `${base}.pdf`,
       title: 'Crown Excel — Customer Master',

@@ -12,7 +12,8 @@ const STORAGE_KEYS = {
   SETTINGS: 'crown_excel_settings_v2',
   INVOICE_COUNTER: 'crown_excel_invoice_counter_v2',
   STAFF: 'crown_excel_staff_v2',
-  LOCATIONS: 'crown_excel_locations_v2'
+  LOCATIONS: 'crown_excel_locations_v2',
+  DEVICE_ID: 'crown_excel_device_id_v2'
 };
 
 const INVOICE_NUMBER_START = 10000;
@@ -63,8 +64,7 @@ const INITIAL_INVOICES = [
     items: [
       { id: 'prod-102', barcode: '8801002', name: 'iPhone 15 Pro Max (256GB - Natural Titanium)', qty: 2, unit: 'Box', imei: '358923009182391 / 358923009182392' },
       { id: 'prod-108', barcode: '8801008', name: 'AirPods Pro (2nd Gen with MagSafe USB-C)', qty: 2, unit: 'Box', imei: '' }
-    ],
-    status: 'Paid'
+    ]
   },
   {
     id: 'INV-88902',
@@ -72,8 +72,7 @@ const INITIAL_INVOICES = [
     customer: { id: 'cust-2', name: 'Vikram Mehta (Apex Mobile & Gadgets)', whatsapp: '+91 91234 56789', email: 'vikram@apexgadgets.com' },
     items: [
       { id: 'prod-101', barcode: '8801001', name: 'MacBook Pro 16-inch M3 Max (36GB RAM, 1TB SSD - Space Black)', qty: 1, unit: 'Box', imei: 'SN: C02G9012MD6R' }
-    ],
-    status: 'Paid'
+    ]
   }
 ];
 
@@ -276,7 +275,7 @@ class StorageService {
   // Flags a record as archived (recoverable) instead of destroying it. It vanishes from every
   // normal view immediately; an admin can restore it, and it's purged for good only after the
   // retention window. Writing back the RAW list keeps other archived rows intact.
-  _archive(key, collection, id) {
+  _archive(key, collection, id, reason = '') {
     const user = this._currentUser || {};
     const all = this._readRaw(key);
     const before = all.find((r) => r.id === id);
@@ -286,7 +285,8 @@ class StorageService {
       deleted: true,
       deletedBy: user.email || '',
       deletedByName: user.displayName || '',
-      deletedAt: new Date().toISOString()
+      deletedAt: new Date().toISOString(),
+      deleteReason: String(reason || '').trim()
     };
     if (!this._setItem(key, all.map((r) => (r.id === id ? archived : r)))) return false;
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
@@ -472,23 +472,60 @@ class StorageService {
     return results.sort((a, b) => new Date(b.invoice.date) - new Date(a.invoice.date));
   }
 
-  // Sequential invoice numbering (INV-10001, INV-10002, ...) — read-only preview of what the
-  // *next* saved invoice will be numbered. Doesn't reserve/consume the number; the counter is
-  // only committed in saveInvoice() so an abandoned bill never leaves a gap in the sequence.
+  // Stable per-browser tag, used only to keep offline-issued invoice numbers from colliding
+  // with numbers another terminal issues while this one is disconnected.
+  _deviceId() {
+    try {
+      let id = localStorage.getItem(STORAGE_KEYS.DEVICE_ID);
+      if (!id) {
+        id = Math.random().toString(36).slice(2, 5).toUpperCase();
+        localStorage.setItem(STORAGE_KEYS.DEVICE_ID, id);
+      }
+      return id;
+    } catch {
+      return 'LOC';
+    }
+  }
+
+  // Highest invoice number this browser knows about. Reads the RAW list so an archived (voided)
+  // bill still holds its number — filtering deleted rows here would let the next bill re-use the
+  // number of a voided one, which is exactly the duplicate an auditor looks for.
+  _localCounter() {
+    const stored = localStorage.getItem(STORAGE_KEYS.INVOICE_COUNTER);
+    const counter = stored !== null ? parseInt(stored, 10) : NaN;
+    if (!Number.isNaN(counter)) return counter;
+    const existingNums = this._readRaw(STORAGE_KEYS.INVOICES)
+      .map((inv) => parseInt(String(inv.id).replace(/\D/g, ''), 10))
+      .filter((n) => !Number.isNaN(n));
+    return existingNums.length > 0 ? Math.max(...existingNums) : INVOICE_NUMBER_START;
+  }
+
+  // Read-only preview of the next number, for the on-screen bill header. Reserves nothing.
   getNextInvoiceNumber() {
     try {
-      const stored = localStorage.getItem(STORAGE_KEYS.INVOICE_COUNTER);
-      let counter = stored !== null ? parseInt(stored, 10) : NaN;
-      if (Number.isNaN(counter)) {
-        const existingNums = this.getInvoices()
-          .map(inv => parseInt(String(inv.id).replace(/\D/g, ''), 10))
-          .filter(n => !Number.isNaN(n));
-        counter = existingNums.length > 0 ? Math.max(...existingNums) : INVOICE_NUMBER_START;
-      }
-      return `INV-${counter + 1}`;
-    } catch (e) {
+      return `INV-${this._localCounter() + 1}`;
+    } catch {
       return 'INV-' + Math.floor(10000 + Math.random() * 90000);
     }
+  }
+
+  // Consumes the next invoice number. Online, the number comes from a Firestore transaction on
+  // counters/invoices, so two terminals finalising at the same instant can never be handed the
+  // same one. Offline (transactions can't run), we fall back to the local sequence and tag the
+  // number with this device — a bill is never blocked, and the tag guarantees the number is still
+  // unique when the write syncs. Tagged numbers are the audit signal that it was issued offline.
+  async reserveInvoiceNumber() {
+    // Seed/heal the shared counter from the highest number this terminal has ever seen, so the
+    // first cloud allocation can't land on top of bills that were numbered locally before this.
+    const floor = Math.max(this._localCounter(), INVOICE_NUMBER_START);
+    const allocated = await firebaseService.allocateSequentialNumber('invoices', floor);
+    if (Number.isFinite(allocated)) {
+      try { this._setItem(STORAGE_KEYS.INVOICE_COUNTER, allocated); } catch { /* preview only */ }
+      return `INV-${allocated}`;
+    }
+    const next = this._localCounter() + 1;
+    try { this._setItem(STORAGE_KEYS.INVOICE_COUNTER, next); } catch { /* preview only */ }
+    return `INV-${next}-${this._deviceId()}`;
   }
 
   saveInvoice(invoice) {
@@ -496,9 +533,14 @@ class StorageService {
     let updated;
     const isNew = !invoice.id || !invoices.some(i => i.id === invoice.id);
     const me = this._currentUser || {};
+    if (isNew && !invoice.id) {
+      // Every caller that creates a bill must reserve its number first (reserveInvoiceNumber),
+      // so the number comes from the shared Firestore counter rather than this browser.
+      console.warn('saveInvoice: new invoice without a reserved number — falling back to the local sequence.');
+    }
     const savedInv = {
       ...invoice,
-      id: invoice.id || this.getNextInvoiceNumber(),
+      id: invoice.id || `${this.getNextInvoiceNumber()}-${this._deviceId()}`,
       date: invoice.date || new Date().toISOString(),
       // Stamp who billed it and from which store — but only on a brand-new invoice, and only if
       // not already set, so later updates (e.g. raising/resolving a query) never overwrite the
@@ -544,15 +586,6 @@ class StorageService {
     // so a failure here must be surfaced to the operator rather than swallowed.
     if (!this._setItem(STORAGE_KEYS.INVOICES, updated)) return null;
 
-    // Commit the sequence counter only now that the invoice is actually persisted,
-    // so an abandoned/failed bill never burns a number and leaves a gap.
-    if (isNew) {
-      const num = parseInt(String(savedInv.id).replace(/\D/g, ''), 10);
-      if (!Number.isNaN(num)) {
-        this._setItem(STORAGE_KEYS.INVOICE_COUNTER, num);
-      }
-    }
-
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
 
     // 2. Live Cloud Firebase Sync
@@ -585,8 +618,16 @@ class StorageService {
     return saved;
   }
 
-  deleteInvoice(id) {
-    return this._archive(STORAGE_KEYS.INVOICES, 'invoices', id);
+  // Voiding a bill is an accounting event: it keeps its number, stays in the record, and must
+  // carry a stated reason. Nothing is ever destroyed here — see purgeExpiredDeletions.
+  deleteInvoice(id, reason = '') {
+    return this._archive(STORAGE_KEYS.INVOICES, 'invoices', id, reason);
+  }
+
+  // Every bill this browser knows about, voided ones included. Exports use this so a voided
+  // invoice can never silently disappear from the audit trail.
+  getInvoicesIncludingArchived() {
+    return this._readRaw(STORAGE_KEYS.INVOICES);
   }
 
   // --- SERIAL REGISTRY (warranty registrations; cloud-authoritative) ---

@@ -144,11 +144,21 @@ export const ProductsManager = () => {
     p.unit || 'Box'
   ]);
 
-  const handleExport = (kind) => {
+  const handleExport = async (kind) => {
     if (products.length === 0) return;
     const base = `Crown_Excel_Electronics_Catalog_${formatLocalDate(new Date())}`;
     if (kind === 'csv') exportToCsv({ filename: `${base}.csv`, headers: exportHeaders, rows: exportRows() });
-    if (kind === 'xlsx') exportToXlsx({ filename: `${base}.xlsx`, sheets: [{ name: 'Products', headers: exportHeaders, rows: exportRows() }] });
+    if (kind === 'xlsx') {
+      try {
+        await exportToXlsx({
+          filename: `${base}.xlsx`,
+          subtitle: `Product Master · ${products.length} devices · Generated ${new Date().toLocaleString()}`,
+          sheets: [{ name: 'Products', headers: exportHeaders, rows: exportRows() }]
+        });
+      } catch (err) {
+        alert(`Could not build the Excel file: ${err.message}`);
+      }
+    }
     if (kind === 'pdf') exportToPdf({
       filename: `${base}.pdf`,
       title: 'Crown Excel — Product Master',

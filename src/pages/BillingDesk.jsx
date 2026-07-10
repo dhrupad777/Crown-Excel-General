@@ -69,6 +69,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   const [newCustomerForm, setNewCustomerForm] = useState({ name: '', company: '', whatsapp: '', email: '' });
 
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const [savedInvoice, setSavedInvoice] = useState(null);
   // Outcome of the post-save warranty auto-registration (null while in flight)
   const [registryReport, setRegistryReport] = useState(null);
@@ -116,14 +117,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (items.length > 0 && selectedCustomer) {
+        if (items.length > 0 && selectedCustomer && !finalizing) {
           handleFinalizeBill();
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [items, selectedCustomer]);
+  }, [items, selectedCustomer, finalizing]);
 
   // Focus the serial input whenever a *different* product becomes active — keyed off the id
   // (a primitive), so this only fires on the actual selection transition, not on every
@@ -281,6 +282,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
 
   // Finalize & Save Invoice
   const handleFinalizeBill = async () => {
+    if (finalizing) return; // a double-click (or a second Ctrl+S) must never mint two bills
     if (items.length === 0) {
       alert("Please add at least one item to the bill.");
       return;
@@ -299,13 +301,22 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       return;
     }
 
-    const invoiceData = {
-      date: new Date().toISOString(),
-      customer: selectedCustomer,
-      items: items
-    };
+    setFinalizing(true);
+    let saved;
+    try {
+      // Take the number from the shared counter before writing anything, so two terminals
+      // finalising at the same moment get different invoice numbers.
+      const invoiceData = {
+        id: await storageService.reserveInvoiceNumber(),
+        date: new Date().toISOString(),
+        customer: selectedCustomer,
+        items: items
+      };
+      saved = storageService.saveInvoice(invoiceData);
+    } finally {
+      setFinalizing(false);
+    }
 
-    const saved = storageService.saveInvoice(invoiceData);
     if (!saved) {
       audioService.playError();
       alert("Failed to save this bill to local storage (device storage may be full). Please free up space or export a backup, then try again.");
@@ -834,11 +845,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
             <button
               type="button"
               onClick={handleFinalizeBill}
-              disabled={items.length === 0 || !selectedCustomer}
-              className="btn btn-primary w-full py-4 text-base shadow-xl shadow-blue-500/30 flex items-center justify-center gap-2.5 group font-black tracking-wide rounded-xl"
+              disabled={items.length === 0 || !selectedCustomer || finalizing}
+              className="btn btn-primary w-full py-4 text-base shadow-xl shadow-blue-500/30 flex items-center justify-center gap-2.5 group font-black tracking-wide rounded-xl disabled:opacity-60"
             >
               <Sparkles className="w-5 h-5 text-yellow-300 animate-pulse" />
-              <span>Finalize & Save Bill (Ctrl+S)</span>
+              <span>{finalizing ? 'Saving bill…' : 'Finalize & Save Bill (Ctrl+S)'}</span>
             </button>
             {(!selectedCustomer || items.length === 0) && (
               <p className="text-[11px] text-center text-amber-600 font-bold">
