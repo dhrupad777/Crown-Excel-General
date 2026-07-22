@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Search,
   FileText,
@@ -22,6 +23,8 @@ import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate, countInvoiceUnits } from '../utils/exportUtils';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
+import { InvoicePrintDocument } from '../components/InvoicePrintDocument';
 import { useAuth } from '../context/AuthContext';
 import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
@@ -30,6 +33,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const [invoices, setInvoices] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [dateFilter, setDateFilter] = useState('all'); // 'all', 'today', 'week', 'month', 'custom'
+  const [teamFilter, setTeamFilter] = useState('all'); // admin-only cross-team filter
   const [customRangeStart, setCustomRangeStart] = useState(null);
   const [customRangeEnd, setCustomRangeEnd] = useState(null);
   const [showCalendarPopover, setShowCalendarPopover] = useState(false);
@@ -211,7 +215,8 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   };
 
   const filteredInvoices = invoices.filter(
-    (inv) => (!searchQuery.trim() || searchMatchIds.has(inv.id)) && passesDateFilter(inv)
+    (inv) => (!isAdmin || teamFilter === 'all' || (inv.teamId || '') === teamFilter)
+      && (!searchQuery.trim() || searchMatchIds.has(inv.id)) && passesDateFilter(inv)
   );
 
   // storageService.searchInvoices only sees active bills, so voided ones need their own (simpler)
@@ -219,7 +224,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const archivedMatchesSearch = (inv) => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return true;
-    return `${inv.id} ${inv.customer?.name || ''} ${inv.customer?.whatsapp || ''}`.toLowerCase().includes(q)
+    return `${inv.invoiceNo || inv.id} ${inv.customer?.name || ''} ${inv.customer?.company || ''} ${inv.customer?.whatsapp || ''}`.toLowerCase().includes(q)
       || (inv.items || []).some((i) => `${i.name || ''} ${i.imei || ''}`.toLowerCase().includes(q));
   };
 
@@ -234,7 +239,12 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   // Item-level matches for the "Matching Items" view — see storageService.searchInvoiceItems.
   // Deliberately not scoped to the active date-filter tab: it answers "show me every sale
   // matching this, ever," mirroring how the serial warranty lookup is already time-independent.
-  const matchingItems = searchQuery.trim() ? storageService.searchInvoiceItems(searchQuery) : [];
+  // A restricted store only sees matches from its own invoices (searchInvoiceItems is global, so
+  // filter it down to the visible set).
+  const visibleInvoiceIds = new Set(invoices.map((inv) => inv.id));
+  const matchingItems = searchQuery.trim()
+    ? storageService.searchInvoiceItems(searchQuery).filter((r) => visibleInvoiceIds.has(r.invoice.id))
+    : [];
 
   // Totals of Filtered Records
   const totalFilteredItems = filteredInvoices.reduce((acc, inv) => acc + countInvoiceUnits(inv), 0);
@@ -380,6 +390,20 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
             )}
           </div>
 
+          {isAdmin && (
+            <select
+              value={teamFilter}
+              onChange={(e) => setTeamFilter(e.target.value)}
+              className="input-field py-3 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl w-full lg:w-48"
+              title="Filter by team — admins see every team"
+            >
+              <option value="all">All Teams</option>
+              {storageService.getActiveLocations().map((loc) => (
+                <option key={loc.id} value={loc.id}>{loc.name}</option>
+              ))}
+            </select>
+          )}
+
           {/* Date Range Tabs — the calendar popover is rendered outside the
               overflow-x-auto container so it isn't clipped by the scroll boundary. */}
           <div className="relative" ref={calendarPopoverRef}>
@@ -491,9 +515,9 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                 </div>
                 <div className="text-left sm:text-right">
                   <div className="font-mono text-xs font-bold text-slate-700">
-                    {invoice.id} • {new Date(invoice.date).toLocaleDateString()}
+                    {invoice.invoiceNo || invoice.id} • {new Date(invoice.date).toLocaleDateString()}
                   </div>
-                  <div className="text-xs font-bold text-slate-600 mt-0.5">{invoice.customer?.name || 'Unknown'}</div>
+                  <div className="text-xs font-bold text-slate-600 mt-0.5">{customerPrimaryName(invoice.customer)}</div>
                 </div>
               </div>
             ))}
@@ -531,7 +555,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   >
                     <td className="py-4 px-6">
                       <div className="font-heading font-black text-slate-900 text-sm flex items-center gap-2">
-                        <span>{inv.id}</span>
+                        <span>{inv.invoiceNo || inv.id}</span>
                         {inv.query && !inv.query.resolved && (
                           <span className="inline-flex items-center gap-0.5 bg-red-50 text-red-600 border border-red-200 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded animate-pulse">
                             <AlertTriangle className="w-3 h-3 text-red-500" /> Query
@@ -551,7 +575,10 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                       </div>
                     </td>
                     <td className="py-4 px-6">
-                      <div className="font-black text-slate-900 text-sm">{inv.customer?.name || 'Unknown'}</div>
+                      <div className="font-black text-slate-900 text-sm">{customerPrimaryName(inv.customer)}</div>
+                      {customerSecondaryName(inv.customer) && (
+                        <div className="text-[11px] font-semibold text-slate-500">{customerSecondaryName(inv.customer)}</div>
+                      )}
                       <div className="font-mono text-xs font-bold text-[#2563eb] mt-0.5">{inv.customer?.whatsapp || ''}</div>
                     </td>
                     <td className="py-4 px-6 text-center font-mono text-slate-700">
@@ -585,11 +612,24 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
         )}
       </div>
 
+      {/* Compact, print-only invoice document rendered into a body-level portal. In print we hide
+          the whole app (#root) and show only this, so a bill isn't padded out with blank space
+          from the invisible on-screen UI. See index.css + InvoicePrintDocument. */}
+      {showDetailModal && !editMode && selectedInvoice && createPortal(
+        <div id="print-root">
+          <InvoicePrintDocument
+            invoice={selectedInvoice}
+            groups={groupInvoiceItems(selectedInvoice.items)}
+          />
+        </div>,
+        document.body
+      )}
+
       {/* --- INVOICE DETAILS & PRINT MODAL --- */}
       <Modal
         isOpen={showDetailModal}
         onClose={() => setShowDetailModal(false)}
-        title={selectedInvoice ? `Invoice — ${selectedInvoice.id}` : 'Invoice'}
+        title={selectedInvoice ? `Invoice — ${selectedInvoice.invoiceNo || selectedInvoice.id}` : 'Invoice'}
         subtitle={selectedInvoice ? new Date(selectedInvoice.date).toLocaleString() : ''}
         icon={FileText}
         maxWidth="max-w-3xl"
@@ -607,7 +647,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   <p className="text-xs font-bold text-slate-500">Enterprise Laptops, Mobile Phones & Gadgets Billing</p>
                 </div>
                 <div className="text-left sm:text-right">
-                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.id}</div>
+                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.invoiceNo || selectedInvoice.id}</div>
                   <div className="font-mono text-xs font-bold text-slate-600 mt-1">
                     {new Date(selectedInvoice.date).toLocaleDateString()} • {new Date(selectedInvoice.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
@@ -624,9 +664,9 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
                   <span className="text-slate-400 uppercase font-black text-[10px] tracking-wider block mb-1">Billed To Partner:</span>
-                  <div className="font-heading font-black text-base text-slate-900">{selectedInvoice.customer?.name}</div>
-                  {selectedInvoice.customer?.company && (
-                    <div className="font-bold text-slate-600">{selectedInvoice.customer.company}</div>
+                  <div className="font-heading font-black text-base text-slate-900">{customerPrimaryName(selectedInvoice.customer)}</div>
+                  {customerSecondaryName(selectedInvoice.customer) && (
+                    <div className="font-bold text-slate-600">{customerSecondaryName(selectedInvoice.customer)}</div>
                   )}
                   <div className="font-mono font-bold text-[#2563eb] mt-0.5">{selectedInvoice.customer?.whatsapp}</div>
                   {selectedInvoice.customer?.email && (
@@ -689,7 +729,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                                 <button
                                   type="button"
                                   onClick={(e) => { e.stopPropagation(); toggleGroup(g.key); }}
-                                  className="no-print inline-flex items-center gap-1.5 font-bold text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 hover:bg-blue-100"
+                                  className="inline-flex items-center gap-1.5 font-bold text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 hover:bg-blue-100"
                                 >
                                   <Shield className="w-3.5 h-3.5" /> {g.serials.length} serial numbers
                                   <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -699,7 +739,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                             <td className="p-3 text-center font-black text-slate-900 font-mono">{g.qty}</td>
                           </tr>
                           {!single && (
-                            <tr className={`${expanded ? '' : 'hidden'} print:!table-row bg-slate-50/60`}>
+                            <tr className={`${expanded ? '' : 'hidden'} bg-slate-50/60`}>
                               <td colSpan={3} className="px-3 pb-3">
                                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5 pt-1">
                                   {g.serials.map((s, i) => (
@@ -867,8 +907,8 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   try {
                     await exportInvoicesXlsx(
                       [selectedInvoice],
-                      exportFilename('xlsx', selectedInvoice.id),
-                      { ...exportMeta(), scope: `Single bill (${selectedInvoice.id})` }
+                      exportFilename('xlsx', selectedInvoice.invoiceNo || selectedInvoice.id),
+                      { ...exportMeta(), scope: `Single bill (${selectedInvoice.invoiceNo || selectedInvoice.id})` }
                     );
                   } catch (err) {
                     alert(`Could not build the Excel file: ${err.message}`);
@@ -898,7 +938,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
             <div className="p-4 rounded-xl bg-blue-50 border-2 border-blue-200 flex items-start gap-3">
               <Edit3 className="w-5 h-5 text-[#2563eb] flex-shrink-0 mt-0.5" />
               <div className="text-xs font-semibold text-slate-700">
-                <span className="font-black text-slate-900">Editing invoice {selectedInvoice.id}.</span> You can correct the
+                <span className="font-black text-slate-900">Editing invoice {selectedInvoice.invoiceNo || selectedInvoice.id}.</span> You can correct the
                 customer / partner attached to this bill. Scanned items and serial numbers are locked to the warranty
                 registry and can't be changed here — for those, delete &amp; re-bill. Every change is recorded in the audit
                 trail with your name, the time, and a before/after snapshot.
@@ -930,7 +970,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                       }}
                       className="w-full text-left p-3 hover:bg-slate-50 flex items-center justify-between gap-2"
                     >
-                      <span className="font-bold text-xs text-slate-900">{c.name}{c.company ? ` — ${c.company}` : ''}</span>
+                      <span className="font-bold text-xs text-slate-900">{customerPrimaryName(c)}{customerSecondaryName(c) ? ` — ${customerSecondaryName(c)}` : ''}</span>
                       <span className="font-mono text-[11px] text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">{c.whatsapp}</span>
                     </button>
                   ))}

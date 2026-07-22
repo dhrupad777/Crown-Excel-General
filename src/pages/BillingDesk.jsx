@@ -27,6 +27,7 @@ import { Modal } from '../components/Modal';
 import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 
 export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   // Bill Items State
@@ -74,14 +75,9 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   // Outcome of the post-save warranty auto-registration (null while in flight)
   const [registryReport, setRegistryReport] = useState(null);
 
-  // Preview of the invoice number this bill will get on save (actual number is only committed at save time)
-  const [nextInvoiceNumber, setNextInvoiceNumber] = useState(() => storageService.getNextInvoiceNumber());
-
-  useEffect(() => {
-    const refreshPreview = () => setNextInvoiceNumber(storageService.getNextInvoiceNumber());
-    window.addEventListener('crown-data-change', refreshPreview);
-    return () => window.removeEventListener('crown-data-change', refreshPreview);
-  }, []);
+  // The invoice number for this bill. Starts blank — the operator types their own number every
+  // time; it's required and must be unique (both enforced on save in handleFinalizeBill).
+  const [invoiceNumber, setInvoiceNumber] = useState('');
 
   // A bill with scanned items but no saved invoice is unfinalized work. Report that "dirty" state
   // up so App can warn before navigating away (the Billing Desk unmounts and the draft is lost),
@@ -117,14 +113,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (items.length > 0 && selectedCustomer && !finalizing) {
+        if (items.length > 0 && selectedCustomer && invoiceNumber.trim() && !finalizing) {
           handleFinalizeBill();
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [items, selectedCustomer, finalizing]);
+  }, [items, selectedCustomer, invoiceNumber, finalizing]);
 
   // Focus the serial input whenever a *different* product becomes active — keyed off the id
   // (a primitive), so this only fires on the actual selection transition, not on every
@@ -272,7 +268,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   // Save New Partner & Attach to Bill
   const handleSaveNewCustomer = (e) => {
     e.preventDefault();
-    if (!newCustomerForm.name || !newCustomerForm.whatsapp) return;
+    if (!newCustomerForm.company.trim()) return;
 
     const savedCust = storageService.saveCustomer(newCustomerForm);
     setSelectedCustomer(savedCust);
@@ -301,13 +297,35 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       return;
     }
 
+    const invNum = invoiceNumber.trim();
+    if (!invNum) {
+      alert("Please enter an invoice number for this bill.");
+      return;
+    }
+    // The number becomes this bill's document id, so reject characters Firestore forbids in an id.
+    if (invNum.includes('/') || invNum === '.' || invNum === '..') {
+      alert("Invoice number can't contain a slash (/) or be '.' or '..'. Use letters, numbers, or dashes.");
+      return;
+    }
+    const teamId = storageService.getCurrentUser()?.locationId || '';
+    if (!teamId) {
+      alert("Your account isn't assigned to a team yet. Ask an administrator to set your team before billing.");
+      return;
+    }
+    if (storageService.isInvoiceNumberTaken(invNum, teamId)) {
+      alert(`Invoice number "${invNum}" is already used by another bill in your team. Please enter a different number.`);
+      return;
+    }
+
     setFinalizing(true);
     let saved;
     try {
-      // Take the number from the shared counter before writing anything, so two terminals
-      // finalising at the same moment get different invoice numbers.
+      // Per-team invoice identity: the doc id is namespaced by team so Dubai's "INV-1" and Nigeria's
+      // "INV-1" are different documents; the human number lives in `invoiceNo`.
       const invoiceData = {
-        id: await storageService.reserveInvoiceNumber(),
+        id: `${teamId}__${invNum}`,
+        invoiceNo: invNum,
+        teamId,
         date: new Date().toISOString(),
         customer: selectedCustomer,
         items: items
@@ -355,6 +373,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setShowSuccessModal(false);
     setSavedInvoice(null);
     setRegistryReport(null);
+    setInvoiceNumber('');
   };
 
   // Generates a plausible 15-digit demo serial number for quick demo bills
@@ -388,6 +407,46 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
         imei: generateDemoImei()
       }));
     });
+
+    setItems((prev) => [...demoItems, ...prev]);
+    setActiveProduct(null);
+    setActiveSerial('');
+    setSerialWarning('');
+
+    if (!selectedCustomer) {
+      const customers = storageService.getCustomers();
+      if (customers.length > 0) {
+        setSelectedCustomer(customers[Math.floor(Math.random() * customers.length)]);
+      }
+    }
+
+    audioService.playBeep();
+  };
+
+  // Loads a single-product bill carrying a large batch of serials — for eyeballing the invoice /
+  // PDF print layout under a heavy serial count. Serials are random throwaway values, so this
+  // bypasses the scan-time duplicate guards by design.
+  const SERIAL_STRESS_COUNT = 250;
+  const handleLoadSerialStressBill = () => {
+    const products = storageService.getProducts();
+    if (products.length === 0) {
+      alert('No products in the catalog yet — add a device before loading a demo bill.');
+      return;
+    }
+
+    const product = products[Math.floor(Math.random() * products.length)];
+    const ts = Date.now();
+    const demoItems = Array.from({ length: SERIAL_STRESS_COUNT }, (_, i) => ({
+      id: `${product.id}-${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+      productId: product.id,
+      barcode: product.barcode,
+      name: product.name,
+      sku: product.sku || '',
+      category: product.category || 'Electronics',
+      qty: 1,
+      unit: product.unit || 'Box',
+      imei: generateDemoImei()
+    }));
 
     setItems((prev) => [...demoItems, ...prev]);
     setActiveProduct(null);
@@ -449,10 +508,17 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                   <Hash className="w-5 h-5" />
                 </div>
                 <div className="text-left sm:text-right">
-                  <span className="text-[11px] text-slate-500 font-bold block">Invoice Number</span>
-                  <span className="text-sm font-mono font-black text-emerald-700">
-                    {nextInvoiceNumber}
-                  </span>
+                  <label htmlFor="invoiceNumberInput" className="text-[11px] text-slate-500 font-bold block">Invoice Number</label>
+                  <input
+                    id="invoiceNumberInput"
+                    type="text"
+                    value={invoiceNumber}
+                    onChange={(e) => setInvoiceNumber(e.target.value)}
+                    placeholder="INV-10001"
+                    required
+                    className="input-field mt-0.5 py-1.5 px-2.5 w-40 text-sm font-mono font-black text-emerald-700 bg-white border-emerald-300 sm:text-right"
+                    title="Required — must be unique"
+                  />
                 </div>
               </div>
             </div>
@@ -472,6 +538,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                     className="text-purple-700 hover:text-purple-900 font-heading text-xs flex items-center gap-1 font-black bg-purple-50 px-3 py-1.5 rounded-lg border-2 border-purple-200 shadow-sm"
                   >
                     <Sparkles className="w-3.5 h-3.5" /> Load Demo Bill
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLoadSerialStressBill}
+                    title="Load one product with 250 serials to preview the invoice / PDF print layout"
+                    className="text-purple-700 hover:text-purple-900 font-heading text-xs flex items-center gap-1 font-black bg-purple-50 px-3 py-1.5 rounded-lg border-2 border-purple-200 shadow-sm"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" /> Demo: 250 Serials
                   </button>
                   <button
                     type="button"
@@ -742,11 +816,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-heading font-black text-slate-900 text-base">{selectedCustomer.name}</span>
+                      <span className="font-heading font-black text-slate-900 text-base">{customerPrimaryName(selectedCustomer)}</span>
                       <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                     </div>
-                    {selectedCustomer.company && (
-                      <div className="text-xs font-bold text-slate-700 mt-0.5">{selectedCustomer.company}</div>
+                    {customerSecondaryName(selectedCustomer) && (
+                      <div className="text-xs font-bold text-slate-700 mt-0.5">{customerSecondaryName(selectedCustomer)}</div>
                     )}
                     <div className="text-xs font-mono font-bold text-[#2563eb] mt-3 flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-blue-200 inline-block shadow-sm">
                       <span>{selectedCustomer.whatsapp}</span>
@@ -794,11 +868,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                         className="p-4 hover:bg-slate-50 cursor-pointer transition-all"
                       >
                         <div className="font-black text-sm text-slate-900 flex items-center justify-between">
-                          <span>{cust.name}</span>
+                          <span>{customerPrimaryName(cust)}</span>
                           <span className="font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded border border-blue-200 font-bold">{cust.whatsapp}</span>
                         </div>
                         <div className="text-xs font-semibold text-slate-500 flex items-center justify-between mt-1">
-                          <span>{cust.company || 'Individual'}</span>
+                          <span>{customerSecondaryName(cust) || 'No contact name'}</span>
                           <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-700 font-bold">{cust.ordersCount || 0} past bills</span>
                         </div>
                       </div>
@@ -812,7 +886,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                     <button
                       type="button"
                       onClick={() => {
-                        setNewCustomerForm({ name: customerSearchQuery, company: '', whatsapp: '', email: '' });
+                        setNewCustomerForm({ name: '', company: customerSearchQuery, whatsapp: '', email: '' });
                         setShowNewCustomerModal(true);
                       }}
                       className="btn btn-primary w-full py-2.5 text-xs font-bold shadow-md"
@@ -845,15 +919,15 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
             <button
               type="button"
               onClick={handleFinalizeBill}
-              disabled={items.length === 0 || !selectedCustomer || finalizing}
+              disabled={items.length === 0 || !selectedCustomer || !invoiceNumber.trim() || finalizing}
               className="btn btn-primary w-full py-4 text-base shadow-xl shadow-blue-500/30 flex items-center justify-center gap-2.5 group font-black tracking-wide rounded-xl disabled:opacity-60"
             >
               <Sparkles className="w-5 h-5 text-yellow-300 animate-pulse" />
               <span>{finalizing ? 'Saving bill…' : 'Finalize & Save Bill (Ctrl+S)'}</span>
             </button>
-            {(!selectedCustomer || items.length === 0) && (
+            {(!selectedCustomer || items.length === 0 || !invoiceNumber.trim()) && (
               <p className="text-[11px] text-center text-amber-600 font-bold">
-                ⚠️ Attach a partner and add at least 1 item to unlock checkout.
+                ⚠️ Enter an invoice number, attach a partner, and add at least 1 item to unlock checkout.
               </p>
             )}
 
@@ -1015,12 +1089,12 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       >
         <form onSubmit={handleSaveNewCustomer} className="space-y-4 font-body">
           <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Partner / Contact Person Name</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company / Business Name</label>
             <input
               type="text"
-              value={newCustomerForm.name}
-              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, name: e.target.value })}
-              placeholder="e.g. Rajesh Kumar"
+              value={newCustomerForm.company}
+              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, company: e.target.value })}
+              placeholder="e.g. Omega Tech Solutions Ltd"
               className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
               autoFocus
               required
@@ -1028,26 +1102,25 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
           </div>
 
           <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company / Business Name (Optional)</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Partner / Contact Person Name (Optional)</label>
             <input
               type="text"
-              value={newCustomerForm.company}
-              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, company: e.target.value })}
-              placeholder="e.g. Omega Tech Solutions Ltd"
+              value={newCustomerForm.name}
+              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, name: e.target.value })}
+              placeholder="e.g. Rajesh Kumar"
               className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
             />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="form-group mb-0">
-              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Phone Number</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Phone Number (Optional)</label>
               <input
                 type="text"
                 value={newCustomerForm.whatsapp}
                 onChange={(e) => setNewCustomerForm({ ...newCustomerForm, whatsapp: e.target.value })}
                 placeholder="+91 98765 43210"
                 className="input-field font-mono font-bold text-[#2563eb] bg-white border-slate-300 py-2.5"
-                required
               />
             </div>
             <div className="form-group mb-0">
@@ -1096,14 +1169,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                 <CheckCircle2 className="w-10 h-10 animate-bounce" />
               </div>
               <h3 className="font-heading font-black text-2xl text-slate-900">
-                Invoice #{savedInvoice.id}
+                Invoice #{savedInvoice.invoiceNo || savedInvoice.id}
               </h3>
               <div className="flex items-center justify-center gap-2 font-mono text-xs font-bold text-slate-600">
                 <span>{new Date(savedInvoice.date).toLocaleString()}</span>
               </div>
               <div className="pt-3 border-t border-slate-100 flex justify-between items-center text-sm px-4 font-bold">
                 <span className="text-slate-500">Partner:</span>
-                <span className="text-slate-900">{savedInvoice.customer.name}</span>
+                <span className="text-slate-900">{customerPrimaryName(savedInvoice.customer)}</span>
               </div>
               <div className="flex justify-between items-center text-sm px-4 font-bold">
                 <span className="text-slate-500">Units Dispatched:</span>

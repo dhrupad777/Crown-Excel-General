@@ -25,7 +25,9 @@ import { firebaseService } from './services/firebase';
 import { useAuth } from './context/AuthContext';
 
 export function App() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, staff } = useAuth();
+  // A non-admin with no team assigned syncs nothing — surface why instead of a blank app.
+  const noTeam = !isAdmin && !staff?.locationId;
   const [activeTab, setActiveTab] = useState('billing');
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
 
@@ -38,6 +40,24 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [firebaseConfig, setFirebaseConfig] = useState(firebaseService.config);
   const [configSaved, setConfigSaved] = useState(false);
+
+  // One-time team migration (admin)
+  const [migrateTeam, setMigrateTeam] = useState('');
+  const [migrating, setMigrating] = useState(false);
+  const [migrateReport, setMigrateReport] = useState(null);
+  const handleMigrate = async () => {
+    if (!migrateTeam) { alert('Pick the team that should own the existing products & partners.'); return; }
+    const teamName = storageService.getLocationName(migrateTeam) || migrateTeam;
+    if (!window.confirm(`Run the one-time team migration?\n\n• Every existing invoice & serial keeps the team that created it.\n• All existing products & partners will be assigned to "${teamName}".\n\nSafe to re-run.`)) return;
+    setMigrating(true);
+    setMigrateReport(null);
+    try {
+      setMigrateReport(await storageService.migrateToTeams(migrateTeam));
+    } catch (e) {
+      alert(`Migration error: ${e.message}`);
+    }
+    setMigrating(false);
+  };
   
   // Import/Export State
   const [importText, setImportText] = useState('');
@@ -126,6 +146,13 @@ export function App() {
 
       {/* Main Content Area (Offset by 280px on desktop for Left Sidebar) */}
       <main className="flex-1 md:ml-[280px] pb-20">
+        {noTeam && (
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+            <div className="bg-amber-50 border-2 border-amber-200 text-amber-800 rounded-2xl p-4 text-sm font-bold flex items-center gap-2">
+              ⚠️ Your account isn’t assigned to a team yet, so there’s no data to show. Ask an administrator to set your team.
+            </div>
+          </div>
+        )}
         {activeTab === 'billing' && (
           <BillingDesk onViewInvoice={handleViewInvoice} onDirtyChange={handleBillDirty} />
         )}
@@ -293,6 +320,48 @@ export function App() {
               </div>
             )}
           </div>
+
+          {/* Section 3: One-time Team Migration (admin) */}
+          {isAdmin && (
+            <div className="p-6 rounded-2xl bg-white border border-blue-200 shadow-sm space-y-3">
+              <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                <ShieldCheck className="w-5 h-5 text-[#2563eb]" />
+                <h4 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">
+                  Team Migration (one-time)
+                </h4>
+              </div>
+              <p className="text-xs font-semibold text-slate-600">
+                Tags all existing data with a team. Invoices &amp; serials keep the team that created them;
+                choose which team owns the existing shared products &amp; partners.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <select
+                  value={migrateTeam}
+                  onChange={(e) => setMigrateTeam(e.target.value)}
+                  className="input-field py-2 text-xs font-bold bg-white border-slate-300 flex-1"
+                >
+                  <option value="">Products &amp; partners → pick a team…</option>
+                  {storageService.getActiveLocations().map((loc) => (
+                    <option key={loc.id} value={loc.id}>{loc.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleMigrate}
+                  disabled={migrating || !migrateTeam}
+                  className="btn btn-primary py-2 px-4 text-xs font-bold whitespace-nowrap disabled:opacity-60"
+                >
+                  {migrating ? 'Migrating…' : 'Run Migration'}
+                </button>
+              </div>
+              {migrateReport && (
+                <div className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  ✓ Done — products {migrateReport.products}, partners {migrateReport.customers}, invoices {migrateReport.invoices}, serials {migrateReport.serials}
+                  {migrateReport.serialsFailed ? `, serials failed ${migrateReport.serialsFailed}` : ''}.
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Close Button */}
           <div className="flex justify-end pt-2">

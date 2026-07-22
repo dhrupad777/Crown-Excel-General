@@ -26,6 +26,7 @@ import { firebaseService } from '../services/firebase';
 import { guessProductDefaults } from '../utils/productDefaults';
 import { useAuth } from '../context/AuthContext';
 import { normalizeSerial, SERIAL_MIN_LENGTH } from '../config/appConfig';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 
 export const SerialCapture = () => {
   const { user, staff } = useAuth();
@@ -204,7 +205,7 @@ export const SerialCapture = () => {
 
   const handleSaveNewCustomer = (e) => {
     e.preventDefault();
-    if (!newCustomerForm.name || !newCustomerForm.whatsapp) return;
+    if (!newCustomerForm.company.trim()) return;
     const saved = storageService.saveCustomer(newCustomerForm);
     setSelectedCustomer(saved);
     setShowNewCustomerModal(false);
@@ -216,7 +217,7 @@ export const SerialCapture = () => {
     const problems = [];
     if (!activeProduct) problems.push('select a product');
     if (pendingSerials.length === 0) problems.push('scan at least one serial number');
-    if (!selectedCustomer?.name) problems.push('attach a customer');
+    if (!selectedCustomer) problems.push('attach a customer');
     if (selectedCustomer && !selectedCustomer.whatsapp) problems.push('customer needs a mobile number');
     if (!locationId) problems.push('choose a store location');
     if (problems.length > 0) {
@@ -494,8 +495,11 @@ export const SerialCapture = () => {
                 <div className="flex items-start justify-between">
                   <div>
                     <span className="font-heading font-black text-slate-900 text-base flex items-center gap-2">
-                      {selectedCustomer.name} <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      {customerPrimaryName(selectedCustomer)} <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                     </span>
+                    {customerSecondaryName(selectedCustomer) && (
+                      <div className="text-xs font-bold text-slate-600 mt-0.5">{customerSecondaryName(selectedCustomer)}</div>
+                    )}
                     <div className="text-xs font-mono font-bold text-[#2563eb] mt-2 bg-white px-3 py-1.5 rounded-lg border border-blue-200 inline-block shadow-sm">
                       {selectedCustomer.whatsapp || 'No mobile number!'}
                     </div>
@@ -537,9 +541,12 @@ export const SerialCapture = () => {
                         className="p-3.5 hover:bg-slate-50 cursor-pointer transition-all"
                       >
                         <div className="font-black text-sm text-slate-900 flex items-center justify-between">
-                          <span>{cust.name}</span>
+                          <span>{customerPrimaryName(cust)}</span>
                           <span className="font-mono text-xs text-[#2563eb] bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">{cust.whatsapp}</span>
                         </div>
+                        {customerSecondaryName(cust) && (
+                          <div className="text-[11px] font-semibold text-slate-500 mt-0.5">{customerSecondaryName(cust)}</div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -583,7 +590,7 @@ export const SerialCapture = () => {
                 invoiceMatch ? (
                   <div className="mt-1.5 flex items-center justify-between gap-2">
                     <span className="text-[11px] font-bold text-emerald-600 flex items-center gap-1">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Found in archive — {invoiceMatch.customer?.name}
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Found in archive — {customerPrimaryName(invoiceMatch.customer)}
                     </span>
                     {invoiceMatch.customer && !selectedCustomer && (
                       <button
@@ -774,27 +781,36 @@ export const SerialCapture = () => {
       >
         <form onSubmit={handleSaveNewCustomer} className="space-y-4 font-body">
           <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Customer Name</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company / Business Name</label>
             <input
               type="text"
-              value={newCustomerForm.name}
-              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, name: e.target.value })}
-              placeholder="e.g. Rajesh Kumar"
+              value={newCustomerForm.company}
+              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, company: e.target.value })}
+              placeholder="e.g. Omega Tech Solutions Ltd"
               className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
               autoFocus
               required
             />
           </div>
+          <div className="form-group mb-0">
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Customer / Contact Name (Optional)</label>
+            <input
+              type="text"
+              value={newCustomerForm.name}
+              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, name: e.target.value })}
+              placeholder="e.g. Rajesh Kumar"
+              className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
+            />
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="form-group mb-0">
-              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Mobile Number</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Mobile Number (Optional)</label>
               <input
                 type="text"
                 value={newCustomerForm.whatsapp}
                 onChange={(e) => setNewCustomerForm({ ...newCustomerForm, whatsapp: e.target.value })}
                 placeholder="+971 50 123 4567"
                 className="input-field font-mono font-bold text-[#2563eb] bg-white border-slate-300 py-2.5"
-                required
               />
             </div>
             <div className="form-group mb-0">
@@ -807,15 +823,6 @@ export const SerialCapture = () => {
                 className="input-field font-mono font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
               />
             </div>
-          </div>
-          <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company (Optional)</label>
-            <input
-              type="text"
-              value={newCustomerForm.company}
-              onChange={(e) => setNewCustomerForm({ ...newCustomerForm, company: e.target.value })}
-              className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
-            />
           </div>
           <div className="pt-4 flex justify-end gap-3 border-t border-slate-200 mt-6">
             <button type="button" onClick={() => setShowNewCustomerModal(false)} className="btn btn-outline font-bold px-5 py-2.5">

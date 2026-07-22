@@ -14,6 +14,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { storageService } from '../services/storage';
+import { customerPrimaryName } from '../utils/customer';
 
 // Simple CSS-bar breakdown list (no chart library — consistent with the app's card design).
 const BreakdownCard = ({ title, icon: Icon, accent, entries, emptyLabel }) => {
@@ -120,9 +121,9 @@ export const RegistrationsDashboard = ({ onViewInvoice }) => {
               >
                 <div className="min-w-0">
                   <div className="font-black text-sm text-slate-900 flex items-center gap-2">
-                    <span className="font-mono">{inv.id}</span>
+                    <span className="font-mono">{inv.invoiceNo || inv.id}</span>
                     <span className="text-slate-400 font-semibold">•</span>
-                    <span className="truncate font-bold text-slate-700">{inv.customer?.name || 'Unknown'}</span>
+                    <span className="truncate font-bold text-slate-700">{customerPrimaryName(inv.customer)}</span>
                   </div>
                   <div className="text-[11px] font-semibold text-slate-600 truncate mt-0.5">
                     &ldquo;{inv.query?.note}&rdquo; — {inv.query?.raisedByName || inv.query?.raisedBy}

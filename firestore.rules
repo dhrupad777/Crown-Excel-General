@@ -1,9 +1,16 @@
 rules_version = '2';
 
 // Crown Excel General — Firestore security rules.
-// Source of truth lives in this repo; publish via Firebase Console → Firestore → Rules.
-// PUBLISH ONLY AFTER the authenticated build is deployed and login is verified — these rules
-// cut off every unauthenticated client the moment they go live.
+// Source of truth lives in this repo; publish via Firebase Console → Firestore → Rules (or the
+// Firebase deploy tooling). PUBLISH ONLY AFTER the authenticated build is deployed, login is
+// verified, AND every existing business doc has been migrated to carry a `teamId` — otherwise
+// un-teamed docs become unreadable to their team (admins still see them).
+//
+// TEAM ISOLATION: each staff member belongs to a team (their `locationId`). products / customers /
+// invoices are readable and writable only within the caller's own team; admins see and manage every
+// team. Serials are the one deliberate exception: their READ stays global so the create-only
+// duplicate transaction can still guarantee one physical unit is registered once across the whole
+// business (a serial = a globally-unique device); creation is still pinned to the caller's team.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -29,18 +36,23 @@ service cloud.firestore {
       return isBootstrapAdmin() || (signedIn() && exists(staffPath())
         && get(staffPath()).data.role == 'admin' && get(staffPath()).data.active == true);
     }
-    // Defense-in-depth: a required text field must be a string within a sane size, so a tampered
-    // or scripted client can't stuff oversized/wrong-typed data past the UI. Generous caps —
-    // no legitimate entry ever approaches them, so this adds zero day-to-day friction.
+    // The caller's team id (their staff record's locationId). Only ever called for non-admin staff
+    // (admins short-circuit before this), who always have a staff doc, so the get() is safe.
+    function myTeam() { return get(staffPath()).data.locationId; }
+    // The existing doc belongs to the caller's team (read / team-scoped update / delete).
+    function ownTeam() {
+      return isStaff() && exists(staffPath()) && resource.data.teamId == myTeam();
+    }
+    // The incoming doc is stamped with the caller's team (create).
+    function newOwnTeam() {
+      return isStaff() && exists(staffPath()) && request.resource.data.teamId == myTeam();
+    }
     function textOk(v, maxLen) { return v is string && v.size() <= maxLen; }
 
     // ---------- Staff allowlist (doc id = lowercase email) ----------
     match /staff/{email} {
-      // Any signed-in account may read its OWN doc (to learn it is unauthorized);
-      // staff may read/list all (user filter dropdowns, admin panel).
       allow get: if isStaff() || (signedIn() && callerEmail() == email);
       allow list: if isStaff();
-      // Admins manage staff
       allow create: if isAdmin()
                         && email == email.lower()
                         && request.resource.data.role in ['admin', 'standard'];
@@ -49,22 +61,24 @@ service cloud.firestore {
       allow delete: if false;   // deactivate via active:false — never delete
     }
 
-    // ---------- Locations ----------
+    // ---------- Locations / Teams ----------
     match /locations/{locId} {
-      allow read: if isStaff();
+      allow read: if isStaff();               // everyone needs the team list
       allow create, update: if isAdmin();
-      allow delete: if false;   // deactivate via active:false
+      allow delete: if false;
     }
 
     // ---------- Serial registrations (doc id = normalized UPPERCASE serial) ----------
-    // CREATE-ONLY semantics are the duplicate-serial guarantee: writing over an existing doc
-    // is an UPDATE, which only an admin can do, only within 24h, and never touching the
-    // identity fields. An existing serial can therefore never be silently replaced.
+    // READ stays global on purpose (see header): the create-only transaction must be able to see a
+    // serial registered by ANY team to stop a cross-business resale. CREATE is pinned to the
+    // caller's team so a registration can't be attributed to someone else's team.
     match /serials/{serial} {
       allow read: if isStaff();
       allow create: if isStaff()
         && serial == serial.upper()
         && request.resource.data.serial == serial
+        && request.resource.data.teamId is string
+        && (isAdmin() || request.resource.data.teamId == myTeam())
         && request.resource.data.createdBy == callerEmail()
         && request.resource.data.createdAt == request.time
         && request.resource.data.productName is string
@@ -72,14 +86,18 @@ service cloud.firestore {
         && request.resource.data.customer.name is string
         && request.resource.data.customer.name.size() > 0
         && request.resource.data.locationId is string;
-      // Admin correction window: 24 hours from creation; identity fields immutable.
-      allow update: if isAdmin()
+      allow update: if (isAdmin()
         && request.time < resource.data.createdAt + duration.value(24, 'h')
         && request.resource.data.serial == resource.data.serial
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.updatedBy == callerEmail()
-        && request.resource.data.updatedAt == request.time;
+        && request.resource.data.updatedAt == request.time)
+        // One-time team migration: an admin may stamp teamId onto a pre-team-model serial, touching
+        // ONLY teamId. Harmless afterwards — it can only ever set teamId to a string.
+        || (isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teamId'])
+        && request.resource.data.teamId is string);
       allow delete: if false;
     }
 
@@ -101,37 +119,39 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // ---------- Existing business collections ----------
-    // Standard staff may ADD products/customers (a new record) but never edit or delete them
-    // (requirement 8A). Editing/deleting is admin-only.
+    // ---------- Team-scoped business collections ----------
+    // Read/list is limited to the caller's own team (admins see every team). Non-admin clients
+    // therefore MUST query with where('teamId','==', myTeam) — an unfiltered read is denied.
     match /products/{id} {
-      allow read: if isStaff();
-      allow create: if isStaff() && textOk(request.resource.data.name, 500);
+      allow read: if isAdmin() || ownTeam();
+      allow create: if isStaff() && textOk(request.resource.data.name, 500)
+                        && (isAdmin() || newOwnTeam());
       allow update, delete: if isAdmin();
     }
     match /customers/{id} {
-      allow read: if isStaff();
-      allow create: if isStaff() && textOk(request.resource.data.name, 500);
+      allow read: if isAdmin() || ownTeam();
+      allow create: if isStaff() && textOk(request.resource.data.name, 500)
+                        && (isAdmin() || newOwnTeam());
       allow delete: if isAdmin();
-      // Admin edits freely; standard staff may only bump ordersCount/totalSpent on invoice commit.
+      // Admin edits freely; standard staff may only bump ordersCount/totalSpent on their own team's
+      // customer during an invoice commit.
       allow update: if isAdmin()
-        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ordersCount', 'totalSpent']));
+        || (ownTeam()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ordersCount', 'totalSpent']));
     }
     match /invoices/{id} {
-      allow read: if isStaff();
-      allow create: if isStaff();
+      allow read: if isAdmin() || ownTeam();
+      allow create: if isStaff() && (isAdmin() || newOwnTeam());
       allow delete: if isAdmin();
-      // Standard staff can only add/update the `query` (concern) field, and its note is size-capped.
+      // Standard staff can only raise/resolve a `query` (concern) on their own team's bill.
       allow update: if isAdmin()
-        || (isStaff()
+        || (ownTeam()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query'])
             && request.resource.data.query is map
             && textOk(request.resource.data.query.note, 5000));
     }
 
-    // Shared sequence counters (currently only `invoices`). Any staff member may draw the next
-    // number, but the sequence may only ever move forward — a rewind would re-issue a number
-    // that already belongs to a finalized bill.
+    // Shared sequence counters — legacy/unused (numbers are operator-entered per team now).
     match /counters/{id} {
       allow read: if isStaff();
       allow create: if isStaff() && request.resource.data.next is int;

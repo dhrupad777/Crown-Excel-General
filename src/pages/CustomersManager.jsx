@@ -9,6 +9,7 @@ import {
   Phone,
   Mail,
   Building,
+  User,
   Check,
   FileSpreadsheet,
   FileText,
@@ -19,12 +20,14 @@ import { Modal } from '../components/Modal';
 import { ImportExcelModal } from '../components/ImportExcelModal';
 import { importCustomers, CUSTOMER_TEMPLATE_HEADERS } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, exportToPdf, formatLocalDate } from '../utils/exportUtils';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 import { useAuth } from '../context/AuthContext';
 
 export const CustomersManager = () => {
   const { isAdmin } = useAuth();
   const [customers, setCustomers] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [teamFilter, setTeamFilter] = useState('all'); // admin-only cross-team filter
   const [showImportModal, setShowImportModal] = useState(false);
 
   // Modal state
@@ -50,6 +53,7 @@ export const CustomersManager = () => {
 
   // Filter customers
   const filteredCustomers = customers.filter(c => {
+    if (isAdmin && teamFilter !== 'all' && (c.teamId || '') !== teamFilter) return false;
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase().trim();
     return (
@@ -63,7 +67,7 @@ export const CustomersManager = () => {
   // Handle Save
   const handleSaveCustomer = (e) => {
     e.preventDefault();
-    if (!formData.name || !formData.whatsapp) return;
+    if (!formData.company.trim()) return;
 
     storageService.saveCustomer({
       ...formData,
@@ -234,6 +238,20 @@ export const CustomersManager = () => {
           )}
         </div>
 
+        {isAdmin && (
+          <select
+            value={teamFilter}
+            onChange={(e) => setTeamFilter(e.target.value)}
+            className="input-field py-2.5 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl w-full sm:w-56"
+            title="Filter by team — admins see every team"
+          >
+            <option value="all">All Teams</option>
+            {storageService.getActiveLocations().map((loc) => (
+              <option key={loc.id} value={loc.id}>{loc.name}</option>
+            ))}
+          </select>
+        )}
+
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs font-bold text-slate-500 pt-3 border-t-2 border-slate-200 gap-2">
           <span className="flex items-center gap-1.5 text-[#2563eb]">
             <Check className="w-4 h-4" /> Instant Customer Matching Active
@@ -257,7 +275,7 @@ export const CustomersManager = () => {
             <table className="data-table w-full min-w-[700px]">
               <thead>
                 <tr>
-                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Customer Name & Company</th>
+                  <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Company & Contact</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">WhatsApp / Phone #</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Email Address</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-center">Total Bills</th>
@@ -268,11 +286,14 @@ export const CustomersManager = () => {
                 {filteredCustomers.map((cust) => (
                   <tr key={cust.id} className="hover:bg-slate-50 transition-colors group">
                     <td className="py-4 px-6">
-                      <div className="font-heading font-black text-slate-900 text-sm">{cust.name}</div>
-                      {cust.company && (
+                      <div className="font-heading font-black text-slate-900 text-sm flex items-center gap-1">
+                        <Building className="w-3.5 h-3.5 text-[#2563eb]" />
+                        <span>{customerPrimaryName(cust)}</span>
+                      </div>
+                      {customerSecondaryName(cust) && (
                         <div className="text-[11px] font-bold text-slate-500 flex items-center gap-1 mt-0.5">
-                          <Building className="w-3 h-3 text-[#2563eb]" />
-                          <span>{cust.company}</span>
+                          <User className="w-3 h-3 text-slate-400" />
+                          <span>{customerSecondaryName(cust)}</span>
                         </div>
                       )}
                     </td>
@@ -306,7 +327,7 @@ export const CustomersManager = () => {
                             <Edit3 className="w-4 h-4" />
                           </button>
                           <button
-                            onClick={() => handleDelete(cust.id, cust.name)}
+                            onClick={() => handleDelete(cust.id, customerPrimaryName(cust))}
                             className="p-2 rounded-lg bg-slate-100 hover:bg-red-100 text-slate-600 hover:text-red-600 transition-colors"
                             title="Delete Customer (admin only)"
                           >
@@ -327,18 +348,18 @@ export const CustomersManager = () => {
       <Modal
         isOpen={showModal}
         onClose={() => setShowModal(false)}
-        title={editingCustomer ? `Edit Customer — ${editingCustomer.name}` : 'Register New Customer'}
+        title={editingCustomer ? `Edit Customer — ${customerPrimaryName(editingCustomer)}` : 'Register New Customer'}
         subtitle="Customer details will be indexed for instant autocomplete during billing."
         icon={Users}
       >
         <form onSubmit={handleSaveCustomer} className="space-y-4 font-body">
           <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Customer / Contact Name</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company / Business Name</label>
             <input
               type="text"
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              placeholder="e.g. Rajesh Kumar"
+              value={formData.company}
+              onChange={(e) => setFormData({ ...formData, company: e.target.value })}
+              placeholder="e.g. Omega Construction Ltd"
               className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
               autoFocus
               required
@@ -346,26 +367,25 @@ export const CustomersManager = () => {
           </div>
 
           <div className="form-group mb-0">
-            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Company / Business Name (Optional)</label>
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Partner / Contact Name (Optional)</label>
             <input
               type="text"
-              value={formData.company}
-              onChange={(e) => setFormData({ ...formData, company: e.target.value })}
-              placeholder="e.g. Omega Construction Ltd"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              placeholder="e.g. Rajesh Kumar"
               className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
             />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="form-group mb-0">
-              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">WhatsApp / Phone #</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">WhatsApp / Phone # (Optional)</label>
               <input
                 type="text"
                 value={formData.whatsapp}
                 onChange={(e) => setFormData({ ...formData, whatsapp: e.target.value })}
                 placeholder="+91 98765 43210"
                 className="input-field font-mono font-bold text-[#2563eb] bg-white border-slate-300 py-2.5"
-                required
               />
             </div>
             <div className="form-group mb-0">

@@ -31,6 +31,7 @@ export const ProductsManager = () => {
   const [products, setProducts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
+  const [teamFilter, setTeamFilter] = useState('all'); // admin-only cross-team filter
   const [showImportModal, setShowImportModal] = useState(false);
 
   // Modal state
@@ -60,6 +61,8 @@ export const ProductsManager = () => {
 
   // Filter products
   const filteredProducts = products.filter(p => {
+    // Admins see every team's catalog merged; this narrows to one team.
+    if (isAdmin && teamFilter !== 'all' && (p.teamId || '') !== teamFilter) return false;
     if (selectedCategory !== 'All' && p.category !== selectedCategory) {
       return false;
     }
@@ -277,6 +280,20 @@ export const ProductsManager = () => {
               </button>
             )}
           </div>
+
+          {isAdmin && (
+            <select
+              value={teamFilter}
+              onChange={(e) => setTeamFilter(e.target.value)}
+              className="input-field py-3 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl w-full lg:w-52"
+              title="Filter by team — admins see every team"
+            >
+              <option value="all">All Teams</option>
+              {storageService.getActiveLocations().map((loc) => (
+                <option key={loc.id} value={loc.id}>{loc.name}</option>
+              ))}
+            </select>
+          )}
 
           <div className="flex items-center gap-2 flex-wrap">
             <div className="relative">

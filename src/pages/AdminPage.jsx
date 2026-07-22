@@ -24,6 +24,7 @@ import {
 import { Modal } from '../components/Modal';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 import { BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
 
 const SectionCard = ({ title, subtitle, icon: Icon, accent, actions, children }) => (
@@ -112,7 +113,7 @@ export const AdminPage = () => {
   const archivedList = [
     ...archived.products.map((r) => ({ collection: 'products', typeLabel: 'Product', id: r.id, label: r.name || r.id, sub: r.barcode ? `#${r.barcode}` : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
     ...archived.customers.map((r) => ({ collection: 'customers', typeLabel: 'Customer', id: r.id, label: r.name || r.id, sub: r.whatsapp || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
-    ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer?.name || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
+    ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer ? customerPrimaryName(r.customer) : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
   ].sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
 
   const purgeDate = (deletedAt) =>
@@ -280,7 +281,7 @@ export const AdminPage = () => {
                 {queriedInvoices.map((inv) => (
                   <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
                     <td className="py-3.5 px-5">
-                      <div className="font-black text-slate-900 text-sm">{inv.id}</div>
+                      <div className="font-black text-slate-900 text-sm">{inv.invoiceNo || inv.id}</div>
                       <div className="text-[10px] font-bold text-slate-500">{new Date(inv.date).toLocaleDateString()}</div>
                     </td>
                     <td className="py-3.5 px-5">
@@ -345,7 +346,7 @@ export const AdminPage = () => {
               <tr>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Staff Member</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Role</th>
-                <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Default Location</th>
+                <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Team</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider text-center">Status</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>
               </tr>
@@ -404,10 +405,10 @@ export const AdminPage = () => {
         </div>
       </SectionCard>
 
-      {/* Locations */}
+      {/* Teams */}
       <SectionCard
-        title="Store & Warehouse Locations"
-        subtitle="Every serial registration is stamped with one of these. Deactivate instead of deleting."
+        title="Teams"
+        subtitle="Each team is an isolated world — its own products, partners, invoices & serials. Assign staff to a team above. Deactivate instead of deleting."
         icon={MapPin}
         accent="text-emerald-600"
         actions={
@@ -711,7 +712,7 @@ export const AdminPage = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="form-group mb-0">
-              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Default Location</label>
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Team</label>
               <select
                 value={staffForm.locationId}
                 onChange={(e) => setStaffForm({ ...staffForm, locationId: e.target.value })}
@@ -829,7 +830,7 @@ export const AdminPage = () => {
       <Modal
         isOpen={showDetailModal}
         onClose={() => setShowDetailModal(false)}
-        title={selectedInvoice ? `Invoice — ${selectedInvoice.id}` : 'Invoice'}
+        title={selectedInvoice ? `Invoice — ${selectedInvoice.invoiceNo || selectedInvoice.id}` : 'Invoice'}
         subtitle={selectedInvoice ? new Date(selectedInvoice.date).toLocaleString() : ''}
         icon={FileText}
         maxWidth="max-w-3xl"
@@ -845,7 +846,7 @@ export const AdminPage = () => {
                   <p className="text-xs font-bold text-slate-500">Enterprise Laptops, Mobile Phones & Gadgets Billing</p>
                 </div>
                 <div className="text-left sm:text-right">
-                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.id}</div>
+                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.invoiceNo || selectedInvoice.id}</div>
                   <div className="font-mono text-xs font-bold text-slate-600 mt-1">
                     {new Date(selectedInvoice.date).toLocaleDateString()} • {new Date(selectedInvoice.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
@@ -855,9 +856,9 @@ export const AdminPage = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
                   <span className="text-slate-400 uppercase font-black text-[10px] tracking-wider block mb-1">Billed To Partner:</span>
-                  <div className="font-heading font-black text-base text-slate-900">{selectedInvoice.customer?.name}</div>
-                  {selectedInvoice.customer?.company && (
-                    <div className="font-bold text-slate-600">{selectedInvoice.customer.company}</div>
+                  <div className="font-heading font-black text-base text-slate-900">{customerPrimaryName(selectedInvoice.customer)}</div>
+                  {customerSecondaryName(selectedInvoice.customer) && (
+                    <div className="font-bold text-slate-600">{customerSecondaryName(selectedInvoice.customer)}</div>
                   )}
                   <div className="font-mono font-bold text-[#2563eb] mt-0.5">{selectedInvoice.customer?.whatsapp}</div>
                   {selectedInvoice.customer?.email && (

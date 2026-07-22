@@ -20,6 +20,7 @@ import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { useAuth } from '../context/AuthContext';
 import { exportSerialsXlsx, exportSerialsCsv, exportSerialsPdf, formatLocalDate } from '../utils/exportUtils';
+import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
 const RENDER_CAP_STEP = 200;
@@ -254,19 +255,23 @@ export const SerialRegistry = () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="relative">
-              <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <select
-                value={locationFilter}
-                onChange={(e) => setLocationFilter(e.target.value)}
-                className="input-field pl-8 pr-8 py-2.5 text-xs font-bold text-slate-800 bg-white border-slate-300 rounded-xl"
-              >
-                <option value="all">All Locations</option>
-                {locations.map((loc) => (
-                  <option key={loc.id} value={loc.id}>{loc.name}</option>
-                ))}
-              </select>
-            </div>
+            {/* Non-admins only ever see their own team's serials (the sync is team-scoped), so the
+                Team picker is admin-only — it lets an admin narrow the all-teams view to one team. */}
+            {isAdmin && (
+              <div className="relative">
+                <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <select
+                  value={locationFilter}
+                  onChange={(e) => setLocationFilter(e.target.value)}
+                  className="input-field pl-8 pr-8 py-2.5 text-xs font-bold text-slate-800 bg-white border-slate-300 rounded-xl"
+                >
+                  <option value="all">All Teams</option>
+                  {locations.map((loc) => (
+                    <option key={loc.id} value={loc.id}>{loc.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="relative">
               <User className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -405,7 +410,7 @@ export const SerialRegistry = () => {
                   {group.records.map((s) => (
                     <span
                       key={s.id}
-                      title={`${s.customer?.name || ''} • ${s.invoiceNo || 'no invoice'} • ${s.date ? new Date(s.date).toLocaleString() : ''}`}
+                      title={`${s.customer ? customerPrimaryName(s.customer) : ''} • ${s.invoiceNo || 'no invoice'} • ${s.date ? new Date(s.date).toLocaleString() : ''}`}
                       className="font-mono text-[11px] font-bold text-slate-800 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg"
                     >
                       {s.serial}
@@ -449,7 +454,10 @@ export const SerialRegistry = () => {
                       <div className="text-[10px] font-bold text-slate-500 font-mono mt-0.5">{s.sku || s.barcode || ''}</div>
                     </td>
                     <td className="py-3.5 px-4">
-                      <div className="font-bold text-slate-900 text-xs">{s.customer?.name}</div>
+                      <div className="font-bold text-slate-900 text-xs">{customerPrimaryName(s.customer)}</div>
+                      {customerSecondaryName(s.customer) && (
+                        <div className="text-[10px] font-semibold text-slate-500">{customerSecondaryName(s.customer)}</div>
+                      )}
                       <div className="text-[10px] font-mono font-bold text-[#2563eb] mt-0.5">{s.customer?.whatsapp}</div>
                     </td>
                     <td className="py-3.5 px-4 font-mono text-xs font-bold text-slate-700">

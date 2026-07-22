@@ -16,6 +16,7 @@ import {
   onSnapshot,
   runTransaction,
   query,
+  where,
   orderBy,
   limit,
   getCountFromServer,
@@ -174,12 +175,15 @@ class FirebaseService {
     }
   }
 
-  // Subscribe to real-time updates from a Firestore collection
-  subscribeToCollection(collectionName, onUpdateCallback) {
+  // Subscribe to real-time updates from a Firestore collection. When `teamId` is provided the
+  // stream is scoped to that team (where('teamId','==',teamId)) — this is what enforces per-team
+  // isolation at the sync layer for non-admins; admins pass no teamId and stream every team.
+  subscribeToCollection(collectionName, onUpdateCallback, teamId = null) {
     if (!this.isInitialized || !this.db) return () => {};
     try {
       const colRef = collection(this.db, collectionName);
-      const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const source = teamId ? query(colRef, where('teamId', '==', teamId)) : colRef;
+      const unsubscribe = onSnapshot(source, (snapshot) => {
         const items = [];
         snapshot.forEach((docSnap) => {
           items.push({ ...docSnap.data(), id: docSnap.id });

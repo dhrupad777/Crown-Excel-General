@@ -340,34 +340,110 @@ h1, h2, h3, h4, h5, h6 {
   animation: laserScan 2.5s infinite linear;
 }
 
-/* Print: show only the active modal's content (e.g. a warranty invoice), not the app chrome */
+/* ============================================================================
+   Invoice printing
+   Printing the on-screen modal was the problem: the rest of the app stayed in
+   the page's layout (just made invisible), so a bill printed surrounded by
+   pages of blank space. Instead we render a dedicated, compact invoice document
+   into #print-root (a body-level portal — see InvoicePrintDocument), hide the
+   whole app when printing, and show only that document. The paper then holds
+   just the invoice.
+   ============================================================================ */
+
+/* The print document is never shown in the on-screen app. */
+#print-root { display: none; }
+
 @media print {
-  body * {
-    visibility: hidden;
-  }
-  .modal-overlay, .modal-overlay * {
-    visibility: visible;
-  }
-  .modal-overlay {
-    position: static !important;
-    background: none !important;
-    backdrop-filter: none !important;
-    padding: 0 !important;
-    align-items: flex-start !important;
-    justify-content: flex-start !important;
-  }
-  .modal-box {
-    box-shadow: none !important;
-    border: none !important;
-    max-width: 100% !important;
-    width: 100% !important;
-  }
-  .modal-body {
-    max-height: none !important;
-    overflow: visible !important;
-    padding: 0 !important;
-  }
-  .no-print {
-    display: none !important;
-  }
+  #root { display: none !important; }
+  #print-root { display: block !important; }
+  .no-print { display: none !important; }
+  @page { size: A4; margin: 12mm; }
+}
+
+/* --- The compact invoice document itself (only ever visible on paper) --- */
+.ce-print-doc {
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #0f172a;
+  font-size: 11px;
+  line-height: 1.4;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.ce-print-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border-bottom: 2px solid #0f172a;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+}
+.ce-print-head h1 {
+  font-family: 'Outfit', sans-serif;
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.ce-print-head p { margin: 2px 0 0; font-size: 9px; color: #64748b; font-weight: 600; }
+.ce-print-meta { text-align: right; font-size: 10px; white-space: nowrap; }
+.ce-print-title {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 900;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: #2563eb;
+}
+.ce-print-edited { color: #b45309; font-size: 9px; margin-top: 2px; }
+.ce-print-parties {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 10px;
+}
+.ce-print-parties > div { flex: 1; min-width: 0; }
+.ce-print-right { text-align: right; }
+.ce-print-label {
+  display: block;
+  text-transform: uppercase;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  font-weight: 800;
+  color: #94a3b8;
+}
+.ce-print-right .ce-print-label { margin-top: 5px; }
+.ce-print-strong { font-weight: 800; }
+.ce-print-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+.ce-print-table th {
+  text-align: left;
+  text-transform: uppercase;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  font-weight: 800;
+  color: #334155;
+  border-bottom: 1.5px solid #cbd5e1;
+  padding: 4px 6px;
+}
+.ce-print-table td {
+  padding: 5px 6px;
+  border-bottom: 0.75px solid #e2e8f0;
+  vertical-align: top;
+}
+.ce-print-table tr { break-inside: avoid; }
+.ce-print-sub { font-size: 8.5px; color: #64748b; }
+.ce-print-serials { font-family: ui-monospace, monospace; font-size: 8.5px; word-break: break-word; }
+.ce-print-qty { text-align: center; width: 44px; font-weight: 800; }
+.ce-print-table tfoot td {
+  border-top: 1.5px solid #cbd5e1;
+  border-bottom: none;
+  font-weight: 800;
+  padding-top: 6px;
+}
+.ce-print-total-label { text-align: right; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em; }
+.ce-print-foot {
+  border-top: 0.75px solid #e2e8f0;
+  padding-top: 6px;
+  font-size: 8.5px;
+  color: #94a3b8;
+  text-align: center;
 }

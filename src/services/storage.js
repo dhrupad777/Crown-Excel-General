@@ -90,6 +90,7 @@ class StorageService {
   // Identity of the logged-in operator, stamped onto serial registrations, audit entries and
   // duplicate-attempt logs. Set by AuthContext when auth resolves; cleared on sign-out.
   setCurrentUser(user) {
+    const prev = this._currentUser;
     this._currentUser = user
       ? {
           email: (user.email || '').toLowerCase(),
@@ -98,10 +99,32 @@ class StorageService {
           locationId: user.locationId || ''
         }
       : null;
+    // If the team or role changed while already synced (e.g. an admin reassigned this user's team),
+    // restart cloud sync so the per-team subscription re-scopes to the new team. Skipped on sign-out
+    // (stopCloudSync handles that) and on the first login (sync not started yet).
+    const teamChanged = (prev?.locationId || '') !== (this._currentUser?.locationId || '')
+      || (prev?.role || '') !== (this._currentUser?.role || '');
+    if (this._syncStarted && teamChanged && this._currentUser) {
+      this.stopCloudSync();
+      this.initCloudSync();
+    }
   }
 
   getCurrentUser() {
     return this._currentUser;
+  }
+
+  // --- Team (tenant) identity ---
+  // Every operator belongs to a team (their locationId). Business data is stamped with `teamId` on
+  // create, and for non-admins only their own team's data is synced down (Firestore query +
+  // firestore.rules enforce it), so the local mirror is already team-scoped. Admins sync every
+  // team's data and narrow it with the UI's Team filter.
+  _currentTeamId() {
+    return this._currentUser?.locationId || '';
+  }
+
+  _isAdmin() {
+    return this._currentUser?.role === 'admin';
   }
 
   initSeedData() {
@@ -136,59 +159,42 @@ class StorageService {
 
     console.log("⚡ Stitching local storage with live Firebase database...");
 
-    // Subscribe to Products
+    // Non-admins only sync their OWN team's data — the subscription issues a
+    // where('teamId','==',team) query and the Firestore rules enforce it. Admins pass `null` and
+    // stream every team, narrowing with the UI's Team filter. A new team simply starts empty; we no
+    // longer push local seed data to the cloud (it would be un-teamed and rejected by the rules).
+    const team = this._isAdmin() ? null : this._currentTeamId();
+
     firebaseService.subscribeToCollection('products', (cloudProducts) => {
-      if (cloudProducts && cloudProducts.length > 0) {
-        localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(cloudProducts));
-        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
-      } else {
-        // If cloud collection is empty, push our local seed inventory to Firebase!
-        const localProds = this.getProducts();
-        localProds.forEach(p => firebaseService.saveToCloud('products', p.id, p));
-      }
-    });
+      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(cloudProducts || []));
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
+    }, team);
 
-    // Subscribe to Customers
     firebaseService.subscribeToCollection('customers', (cloudCustomers) => {
-      if (cloudCustomers && cloudCustomers.length > 0) {
-        localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(cloudCustomers));
-        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
-      } else {
-        // If cloud collection is empty, push seed customers to Firebase!
-        const localCusts = this.getCustomers();
-        localCusts.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
-      }
-    });
+      localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(cloudCustomers || []));
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
+    }, team);
 
-    // Subscribe to Invoices
     firebaseService.subscribeToCollection('invoices', (cloudInvoices) => {
-      if (cloudInvoices && cloudInvoices.length > 0) {
-        localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(cloudInvoices));
-        window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
-      } else {
-        // If cloud collection is empty, push seed invoices to Firebase!
-        const localInvs = this.getInvoices();
-        localInvs.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
-      }
-    });
+      localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(cloudInvoices || []));
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+    }, team);
 
-    // Subscribe to Serial Registrations. Kept IN MEMORY (not localStorage): a busy registry
-    // would blow the ~5MB localStorage quota shared with products/invoices, and Firestore's
-    // own IndexedDB persistence already gives us the durable local copy.
+    // Serial Registrations — kept IN MEMORY (a busy registry would blow the localStorage quota).
+    // Also team-scoped for display; the doc id stays the bare serial so the create-only transaction
+    // still guarantees one physical unit is registered once across the whole business.
     firebaseService.subscribeToCollection('serials', (cloudSerials) => {
       this._serialsCache = cloudSerials || [];
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'serials' } }));
-    });
+    }, team);
 
-    // Subscribe to Staff allowlist (small; mirrored for filter dropdowns + role refresh).
+    // Staff & locations are the shared roster + team list — every signed-in user needs them, so
+    // they stay whole-collection.
     firebaseService.subscribeToCollection('staff', (cloudStaff) => {
       this._setItem(STORAGE_KEYS.STAFF, cloudStaff || []);
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'staff' } }));
     });
 
-    // Subscribe to Locations (small; mirrored for the capture form + filters). The default
-    // location is seeded by the admin bootstrap in auth.js, not here — standard users lack
-    // rules permission to create locations.
     firebaseService.subscribeToCollection('locations', (cloudLocations) => {
       this._setItem(STORAGE_KEYS.LOCATIONS, cloudLocations || []);
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'locations' } }));
@@ -240,10 +246,14 @@ class StorageService {
     const products = this._readRaw(STORAGE_KEYS.PRODUCTS);
     let updated;
     const isNew = !product.id || !products.some(p => p.id === product.id);
+    const existing = isNew ? null : products.find(p => p.id === product.id);
     const savedProd = {
       ...product,
       id: product.id || 'prod-' + Date.now(),
-      barcode: product.barcode || Math.floor(1000000 + Math.random() * 9000000).toString()
+      barcode: product.barcode || Math.floor(1000000 + Math.random() * 9000000).toString(),
+      // Owning team. Preserved on edit (so an admin editing another team's product can't reassign
+      // it); new products inherit the creator's team.
+      teamId: product.teamId || existing?.teamId || this._currentTeamId()
     };
 
     if (!isNew) {
@@ -378,10 +388,13 @@ class StorageService {
     const customers = this._readRaw(STORAGE_KEYS.CUSTOMERS);
     let updated;
     const isNew = !customer.id || !customers.some(c => c.id === customer.id);
+    const existing = isNew ? null : customers.find(c => c.id === customer.id);
     const savedCust = {
       ...customer,
       id: customer.id || 'cust-' + Date.now(),
-      ordersCount: customer.ordersCount || 0
+      ordersCount: customer.ordersCount || 0,
+      // Owning team — preserved on edit, inherited from the creator on a new partner.
+      teamId: customer.teamId || existing?.teamId || this._currentTeamId()
     };
 
     if (!isNew) {
@@ -414,12 +427,27 @@ class StorageService {
     return invoices.find(inv => inv.id === id) || null;
   }
 
+  // True if a bill in the given team already carries this number. Numbers are per-team now (Dubai's
+  // "INV-1" is independent of Nigeria's), so the scan is scoped to `teamId`. Matches the human
+  // `invoiceNo` (falling back to the raw id for legacy bills), case-insensitively, and reads the RAW
+  // list so a voided number still counts as spent.
+  isInvoiceNumberTaken(num, teamId = null) {
+    const q = String(num || '').trim().toLowerCase();
+    if (!q) return false;
+    const team = teamId != null ? teamId : this._currentTeamId();
+    return this._readRaw(STORAGE_KEYS.INVOICES).some(inv => {
+      if (team && (inv.teamId || '') !== team) return false;
+      return String(inv.invoiceNo || inv.id || '').trim().toLowerCase() === q;
+    });
+  }
+
   searchInvoices(query) {
     const invoices = this.getInvoices();
     if (!query || !query.trim()) return invoices;
     const q = query.toLowerCase().trim();
     return invoices.filter(inv =>
       inv.id?.toLowerCase().includes(q) ||
+      inv.invoiceNo?.toLowerCase().includes(q) ||
       inv.customer?.name?.toLowerCase().includes(q) ||
       inv.customer?.whatsapp?.toLowerCase().includes(q) ||
       inv.customer?.company?.toLowerCase().includes(q) ||
@@ -491,13 +519,20 @@ class StorageService {
   // bill still holds its number — filtering deleted rows here would let the next bill re-use the
   // number of a voided one, which is exactly the duplicate an auditor looks for.
   _localCounter() {
-    const stored = localStorage.getItem(STORAGE_KEYS.INVOICE_COUNTER);
-    const counter = stored !== null ? parseInt(stored, 10) : NaN;
-    if (!Number.isNaN(counter)) return counter;
-    const existingNums = this._readRaw(STORAGE_KEYS.INVOICES)
-      .map((inv) => parseInt(String(inv.id).replace(/\D/g, ''), 10))
+    // The highest auto-series number this browser knows about. We only parse ids of our own
+    // "INV-<n>" shape (optionally with an offline device tag like INV-10005-AB3) so a custom,
+    // operator-typed invoice number — which can contain unrelated digits, e.g. CE-2024-01 — never
+    // inflates the next suggestion. Take the max of the cached counter and what the invoices show,
+    // since the cached counter is no longer actively bumped now that numbers are operator-entered.
+    const stored = parseInt(localStorage.getItem(STORAGE_KEYS.INVOICE_COUNTER), 10);
+    const fromInvoices = this._readRaw(STORAGE_KEYS.INVOICES)
+      .map((inv) => {
+        const m = /^INV-(\d+)/.exec(String(inv.id || ''));
+        return m ? parseInt(m[1], 10) : NaN;
+      })
       .filter((n) => !Number.isNaN(n));
-    return existingNums.length > 0 ? Math.max(...existingNums) : INVOICE_NUMBER_START;
+    const derived = fromInvoices.length > 0 ? Math.max(...fromInvoices) : INVOICE_NUMBER_START;
+    return Number.isNaN(stored) ? derived : Math.max(stored, derived);
   }
 
   // Read-only preview of the next number, for the on-screen bill header. Reserves nothing.
@@ -549,8 +584,9 @@ class StorageService {
         ? {
             billedBy: me.email || '',
             billedByName: me.displayName || '',
-            locationId: me.locationId || '',
-            locationName: this.getLocationName(me.locationId) || ''
+            teamId: invoice.teamId || me.locationId || '',
+            locationId: invoice.teamId || me.locationId || '',
+            locationName: this.getLocationName(invoice.teamId || me.locationId) || ''
           }
         : {})
     };
@@ -658,6 +694,7 @@ class StorageService {
       s.sku?.toLowerCase().includes(q) ||
       s.barcode?.toLowerCase().includes(q) ||
       s.customer?.name?.toLowerCase().includes(q) ||
+      s.customer?.company?.toLowerCase().includes(q) ||
       s.customer?.whatsapp?.toLowerCase().includes(q) ||
       s.customer?.email?.toLowerCase().includes(q) ||
       s.invoiceNo?.toLowerCase().includes(q) ||
@@ -696,10 +733,12 @@ class StorageService {
         customer: {
           id: customer?.id || '',
           name: customer?.name || '',
+          company: customer?.company || '',
           whatsapp: customer?.whatsapp || '',
           email: customer?.email || ''
         },
         invoiceNo: invoiceNo || '',
+        teamId: locationId || this._currentTeamId(),
         locationId: locationId || '',
         locationName: locationName || '',
         registeredByName: user.displayName || '',
@@ -772,16 +811,18 @@ class StorageService {
 
     const totals = { registered: [], duplicates: [], failed: [] };
     for (const item of items) {
+      const teamId = invoice.teamId || this._currentUser?.locationId || '';
+      const invNo = invoice.invoiceNo || invoice.id;
       const res = await this.registerSerials({
         product: { id: item.productId || item.id, name: item.name, sku: item.sku || '', category: item.category || '', barcode: item.barcode || '' },
         serials: [item.imei],
         customer: invoice.customer,
-        invoiceNo: invoice.id,
-        locationId: this._currentUser?.locationId || '',
-        locationName: this.getLocationName(this._currentUser?.locationId),
+        invoiceNo: invNo,
+        locationId: teamId,
+        locationName: this.getLocationName(teamId),
         remarks: '',
         source: 'billing',
-        batchId: invoice.id
+        batchId: invNo
       });
       totals.registered.push(...res.registered);
       totals.duplicates.push(...res.duplicates);
@@ -918,6 +959,7 @@ class StorageService {
 
   // Registration analytics for the Dashboard tab, computed from the live in-memory registry.
   getSerialStats() {
+    // The mirror is already team-scoped (non-admin) or full (admin), so no extra filtering here.
     const serials = this._serialsCache;
     const now = new Date();
     const todayKey = now.toDateString();
@@ -957,9 +999,11 @@ class StorageService {
 
   // --- STATS & UTILS ---
   getDashboardStats() {
+    // Every read below is already team-scoped by the mirror (non-admin) or full (admin).
     const invoices = this.getInvoices();
     const products = this.getProducts();
     const customers = this.getCustomers();
+    const serials = this._serialsCache;
 
     const totalItemsSold = invoices.reduce((sum, inv) => sum + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
     const openQueries = invoices.filter((inv) => inv.query && !inv.query.resolved).length;
@@ -968,27 +1012,77 @@ class StorageService {
       invoicesCount: invoices.length,
       productsCount: products.length,
       customersCount: customers.length,
-      serialsCount: this._serialsCache.length,
+      serialsCount: serials.length,
       totalItemsSold,
       openQueries
     };
   }
 
   resetToDemoData() {
+    // Stamp the seed with the current admin's team so it isn't orphaned/rejected under the
+    // per-team rules; invoices also get a human `invoiceNo` mirroring their id.
+    const team = this._currentTeamId();
+    const products = INITIAL_PRODUCTS.map(p => ({ ...p, teamId: team }));
+    const customers = INITIAL_CUSTOMERS.map(c => ({ ...c, teamId: team }));
+    const invoices = INITIAL_INVOICES.map(inv => ({ ...inv, teamId: team, invoiceNo: inv.invoiceNo || inv.id }));
     const ok = [
-      this._setItem(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS),
-      this._setItem(STORAGE_KEYS.CUSTOMERS, INITIAL_CUSTOMERS),
-      this._setItem(STORAGE_KEYS.INVOICES, INITIAL_INVOICES)
+      this._setItem(STORAGE_KEYS.PRODUCTS, products),
+      this._setItem(STORAGE_KEYS.CUSTOMERS, customers),
+      this._setItem(STORAGE_KEYS.INVOICES, invoices)
     ].every(Boolean);
     if (!ok) return false;
 
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
 
     // Push reset seed data to live Firebase cloud!
-    INITIAL_PRODUCTS.forEach(p => firebaseService.saveToCloud('products', p.id, p));
-    INITIAL_CUSTOMERS.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
-    INITIAL_INVOICES.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
+    products.forEach(p => firebaseService.saveToCloud('products', p.id, p));
+    customers.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
+    invoices.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
     return true;
+  }
+
+  // One-time migration to the team model. Stamps `teamId` on every existing record:
+  //  • invoices & serials keep the team that created them (their existing locationId);
+  //  • the shared product & partner catalog (which has no team) goes to `catalogTeamId`;
+  //  • legacy invoices also get an `invoiceNo` mirroring their id (so the display is uniform).
+  // Runs from an ADMIN session — the admin mirror holds every team's data, and the rules permit an
+  // admin to write these (incl. a dedicated exception to add teamId to old serials). Returns counts;
+  // safe to re-run (records that already carry a teamId are left as-is).
+  async migrateToTeams(catalogTeamId) {
+    if (this._currentUser?.role !== 'admin') throw new Error('Only an administrator can run the team migration.');
+    if (!catalogTeamId) throw new Error('Pick the team that should own the existing products & partners.');
+    const report = { products: 0, customers: 0, invoices: 0, serials: 0, serialsFailed: 0 };
+
+    const products = this._readRaw(STORAGE_KEYS.PRODUCTS).map(p => ({ ...p, teamId: p.teamId || catalogTeamId }));
+    this._setItem(STORAGE_KEYS.PRODUCTS, products);
+    products.forEach(p => { firebaseService.saveToCloud('products', p.id, p); report.products++; });
+
+    const customers = this._readRaw(STORAGE_KEYS.CUSTOMERS).map(c => ({ ...c, teamId: c.teamId || catalogTeamId }));
+    this._setItem(STORAGE_KEYS.CUSTOMERS, customers);
+    customers.forEach(c => { firebaseService.saveToCloud('customers', c.id, c); report.customers++; });
+
+    const invoices = this._readRaw(STORAGE_KEYS.INVOICES).map(inv => ({
+      ...inv,
+      teamId: inv.teamId || inv.locationId || catalogTeamId,
+      invoiceNo: inv.invoiceNo || inv.id
+    }));
+    this._setItem(STORAGE_KEYS.INVOICES, invoices);
+    invoices.forEach(inv => { firebaseService.saveToCloud('invoices', inv.id, inv); report.invoices++; });
+
+    // Serials are create-only; add teamId via the admin update path (the rules' migration exception
+    // allows an admin to set teamId on a serial that predates the team model). Sequential + awaited.
+    for (const s of [...this._serialsCache]) {
+      if (s.teamId) continue;
+      const teamId = s.locationId || catalogTeamId;
+      try {
+        await firebaseService.updateDocStrict('serials', s.id, { teamId });
+        report.serials++;
+      } catch {
+        report.serialsFailed++;
+      }
+    }
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
+    return report;
   }
 
   exportAllData() {

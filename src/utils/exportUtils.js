@@ -74,7 +74,7 @@ const serialToRow = (s) => [
   s.productName || '',
   s.category || '',
   s.barcode || '',
-  s.customer?.name || '',
+  s.customer?.name || s.customer?.company || '',
   s.customer?.whatsapp || '',
   s.customer?.email || '',
   s.invoiceNo || '',
