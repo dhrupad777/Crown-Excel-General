@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
+import { SerialCheckModal } from '../components/SerialCheckModal';
 import TeamTag from '../components/TeamTag';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { useAuth } from '../context/AuthContext';
@@ -46,6 +47,7 @@ export const SerialRegistry = () => {
 
   const [viewMode, setViewMode] = useState('flat'); // flat | grouped
   const [renderCap, setRenderCap] = useState(RENDER_CAP_STEP);
+  const [showCheckModal, setShowCheckModal] = useState(false);
 
   // Admin edit modal
   const [editingRecord, setEditingRecord] = useState(null);
@@ -222,6 +224,13 @@ export const SerialRegistry = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
+          <button
+            onClick={() => setShowCheckModal(true)}
+            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial border-[#2563eb] text-[#2563eb] hover:bg-blue-50"
+            title="Upload a list of invoiced serials and see which are already registered"
+          >
+            <ShieldCheck className="w-4 h-4" /> Check Serials
+          </button>
           <button onClick={() => handleExport('xlsx')} className="btn btn-primary text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial shadow-md shadow-blue-500/10">
             <FileSpreadsheet className="w-4 h-4" /> Excel (.xlsx)
           </button>
@@ -631,6 +640,8 @@ export const SerialRegistry = () => {
           </form>
         )}
       </Modal>
+
+      <SerialCheckModal isOpen={showCheckModal} onClose={() => setShowCheckModal(false)} />
     </div>
   );
 };

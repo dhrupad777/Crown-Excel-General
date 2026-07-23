@@ -10,9 +10,13 @@ const cellText = (v) => {
   if (v === null || v === undefined) return '';
   if (v instanceof Date) return v.toISOString();
   if (typeof v === 'object') {
+    // A failed formula reads back as { error: '#N/A' } (directly, or nested under `result` for a
+    // VLOOKUP). Stringifying that yielded the literal "[object Object]", which then imported as
+    // real data — treat an errored cell as empty instead.
+    if (v.error !== undefined) return '';
     if (Array.isArray(v.richText)) return v.richText.map((r) => r.text).join('');
+    if (v.result !== undefined) return cellText(v.result);
     if (v.text !== undefined) return String(v.text);
-    if (v.result !== undefined) return String(v.result);
     if (v.hyperlink) return String(v.hyperlink);
     return '';
   }
@@ -287,6 +291,19 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
   });
 
   return result;
+};
+
+// How many usable values each column holds. The serial check uses this to pre-select the right
+// column: a reconciliation sheet often pairs a full list against a VLOOKUP column that is only
+// partly filled, and the fullest column is the one actually worth checking.
+export const columnValueCounts = (rows) => {
+  const counts = {};
+  rows.forEach((r) => {
+    Object.keys(r).forEach((k) => {
+      if (String(r[k] ?? '').trim()) counts[k] = (counts[k] || 0) + 1;
+    });
+  });
+  return counts;
 };
 
 export const buildErrorReportRows = (errors) =>

@@ -702,6 +702,54 @@ class StorageService {
     return this._serialsCache.find(s => s.id === id || s.serial === id) || null;
   }
 
+  // Reconciles a list of invoiced/scanned serials against the warranty registry — the app-native
+  // replacement for checking a spreadsheet against the registry by hand with VLOOKUP.
+  // Two passes: the local mirror first (instant), then a cloud lookup for whatever it missed.
+  // That second pass matters — a non-admin's mirror only holds their OWN region's serials, so
+  // without it a unit registered by another team would be reported as "not registered". The
+  // serials read is global by design (see firestore.rules), so the cloud answer is authoritative.
+  // Returns { rows, total, registered, missing, duplicatesInFile }.
+  async checkSerials(rawSerials) {
+    const byId = new Map();
+    const rows = [];
+    for (const raw of rawSerials || []) {
+      const id = normalizeSerial(raw);
+      if (!id) continue;
+      if (byId.has(id)) { byId.get(id).duplicateInFile += 1; continue; }
+      const rec = { serial: id, raw: String(raw).trim(), duplicateInFile: 0, registered: false, record: null };
+      byId.set(id, rec);
+      rows.push(rec);
+    }
+
+    const misses = [];
+    for (const r of rows) {
+      const hit = this.findSerial(r.serial);
+      if (hit) { r.registered = true; r.record = hit; } else misses.push(r);
+    }
+
+    // Bounded concurrency so a 300-serial sheet doesn't open 300 sockets at once.
+    const CHUNK = 25;
+    for (let i = 0; i < misses.length; i += CHUNK) {
+      const slice = misses.slice(i, i + CHUNK);
+      const found = await Promise.all(slice.map((r) => firebaseService.getDocOnce('serials', r.serial)));
+      found.forEach((res, idx) => {
+        if (res?.exists && res.data) {
+          slice[idx].registered = true;
+          slice[idx].record = res.data;
+        }
+      });
+    }
+
+    const registered = rows.filter((r) => r.registered).length;
+    return {
+      rows,
+      total: rows.length,
+      registered,
+      missing: rows.length - registered,
+      duplicatesInFile: rows.reduce((n, r) => n + r.duplicateInFile, 0)
+    };
+  }
+
   // Partial, combinable free-text search across every reportable dimension (mirrors the
   // matching style of searchInvoices).
   searchSerials(query) {
