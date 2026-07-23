@@ -43,7 +43,8 @@ export const ProductsManager = () => {
     name: '',
     sku: '',
     category: 'Mobile Phones',
-    unit: 'Box'
+    unit: 'Box',
+    team: ''
   });
 
   // Tracks manual overrides so auto-detect (new products only) doesn't clobber an explicit choice
@@ -91,8 +92,17 @@ export const ProductsManager = () => {
       return;
     }
 
+    // Admins aren't bound to one region, so they must pick which team owns the product —
+    // otherwise it would save untagged. Standard staff have their region stamped automatically.
+    if (isAdmin && !formData.team) {
+      alert('Please select which region (team) this product belongs to.');
+      return;
+    }
+
+    const { team, ...productFields } = formData;
     storageService.saveProduct({
-      ...formData,
+      ...productFields,
+      teamId: team || undefined,
       id: editingProduct ? editingProduct.id : undefined
     });
 
@@ -117,7 +127,8 @@ export const ProductsManager = () => {
       name: prod.name || '',
       sku: prod.sku || '',
       category: prod.category || 'Mobile Phones',
-      unit: prod.unit || 'Box'
+      unit: prod.unit || 'Box',
+      team: prod.teamId || ''
     });
     // Editing an existing, already-correctly-categorized product should never be auto-reclassified
     setCategoryTouched(true);
@@ -132,7 +143,8 @@ export const ProductsManager = () => {
       name: '',
       sku: '',
       category: 'Mobile Phones',
-      unit: 'Box'
+      unit: 'Box',
+      team: storageService.getCurrentTeamId() || ''
     });
     setCategoryTouched(false);
     setShowModal(true);
@@ -445,6 +457,27 @@ export const ProductsManager = () => {
               </select>
             </div>
           </div>
+
+          {/* Admins aren't tied to one region, so they choose which team owns this product. Standard
+              staff don't see this — their own region is stamped automatically. */}
+          {isAdmin && (
+            <div className="form-group mb-0">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">
+                Region / Team <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={formData.team}
+                onChange={(e) => setFormData({ ...formData, team: e.target.value })}
+                className="input-field font-bold text-slate-800 bg-white border-slate-300 py-2.5"
+                required
+              >
+                <option value="">Select region…</option>
+                {storageService.getTeams().map((team) => (
+                  <option key={team} value={team}>{team}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="form-group mb-0">
             <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Device Model Name & Specs</label>

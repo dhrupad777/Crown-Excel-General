@@ -38,7 +38,8 @@ export const CustomersManager = () => {
     name: '',
     company: '',
     whatsapp: '',
-    email: ''
+    email: '',
+    team: ''
   });
 
   const loadCustomers = () => {
@@ -70,8 +71,17 @@ export const CustomersManager = () => {
     e.preventDefault();
     if (!formData.company.trim()) return;
 
+    // Admins aren't bound to one region, so they choose which team owns this partner —
+    // otherwise it saves untagged. Standard staff have their region stamped automatically.
+    if (isAdmin && !formData.team) {
+      alert('Please select which region (team) this partner belongs to.');
+      return;
+    }
+
+    const { team, ...customerFields } = formData;
     storageService.saveCustomer({
-      ...formData,
+      ...customerFields,
+      teamId: team || undefined,
       id: editingCustomer ? editingCustomer.id : undefined,
       ordersCount: editingCustomer ? editingCustomer.ordersCount : 0
     });
@@ -96,7 +106,8 @@ export const CustomersManager = () => {
       name: cust.name || '',
       company: cust.company || '',
       whatsapp: cust.whatsapp || '',
-      email: cust.email || ''
+      email: cust.email || '',
+      team: cust.teamId || ''
     });
     setShowModal(true);
   };
@@ -108,7 +119,8 @@ export const CustomersManager = () => {
       name: '',
       company: '',
       whatsapp: '',
-      email: ''
+      email: '',
+      team: storageService.getCurrentTeamId() || ''
     });
     setShowModal(true);
   };
@@ -406,6 +418,27 @@ export const CustomersManager = () => {
               />
             </div>
           </div>
+
+          {/* Admins aren't tied to one region, so they choose which team owns this partner. Standard
+              staff don't see this — their own region is stamped automatically. */}
+          {isAdmin && (
+            <div className="form-group mb-0">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">
+                Region / Team <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={formData.team}
+                onChange={(e) => setFormData({ ...formData, team: e.target.value })}
+                className="input-field font-bold text-slate-800 bg-white border-slate-300 py-2.5"
+                required
+              >
+                <option value="">Select region…</option>
+                {storageService.getTeams().map((team) => (
+                  <option key={team} value={team}>{team}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="pt-4 flex justify-end gap-3 border-t-2 border-slate-200 mt-6">
             <button
