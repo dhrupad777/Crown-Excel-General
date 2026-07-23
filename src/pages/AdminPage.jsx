@@ -247,6 +247,55 @@ export const AdminPage = () => {
     setLocationSaving(false);
   };
 
+  // --- Region rename (re-tags every store + all its products/partners/invoices/serials) ---
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameFrom, setRenameFrom] = useState('');
+  const [renameTo, setRenameTo] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState('');
+  const [renameResult, setRenameResult] = useState(null);
+
+  const openRenameRegion = (team) => {
+    setRenameFrom(team);
+    setRenameTo(team);
+    setRenameError('');
+    setRenameResult(null);
+    setShowRenameModal(true);
+  };
+
+  const handleRenameRegion = async (e) => {
+    e.preventDefault();
+    const to = renameTo.trim();
+    if (!to) { setRenameError('Enter the new region name.'); return; }
+    if (to === renameFrom) { setRenameError('The new name is the same as the current one.'); return; }
+    // Renaming onto an existing region merges the two into one shared dataset — make that explicit.
+    const merging = storageService.getTeams().some((t) => t.toLowerCase() === to.toLowerCase() && t !== renameFrom);
+    if (merging && !window.confirm(`"${to}" already exists. Renaming will MERGE "${renameFrom}" into "${to}" — every store and record from both will share one dataset. Continue?`)) {
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError('');
+    try {
+      const report = await storageService.renameTeam(renameFrom, to);
+      setRenameResult(report);
+      setStaffList(storageService.getStaff());
+      setLocations(storageService.getLocations());
+    } catch (err) {
+      setRenameError(err.message || 'Could not rename the region.');
+    }
+    setRenameSaving(false);
+  };
+
+  // Region roll-up for the dashboard overview: stores, staff and data counts per region.
+  const regionOfStore = (locId) => locations.find((l) => l.id === locId)?.team || '';
+  const dataCounts = storageService.getTeamDataCounts();
+  const regionRows = [...new Set(locations.map((l) => l.team).filter(Boolean))].sort().map((team) => ({
+    team,
+    stores: locations.filter((l) => l.team === team),
+    staffCount: staffList.filter((s) => s.active !== false && regionOfStore(s.locationId) === team).length,
+    counts: dataCounts[team] || { products: 0, customers: 0, invoices: 0, serials: 0 }
+  }));
+
   const filteredAudit = auditEntries.filter((a) => {
     if (!auditFilter.trim()) return true;
     const q = auditFilter.toLowerCase();
@@ -350,7 +399,7 @@ export const AdminPage = () => {
               <tr>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Staff Member</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Role</th>
-                <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Team</th>
+                <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider">Store · Region</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider text-center">Status</th>
                 <th className="py-3.5 px-5 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>
               </tr>
@@ -383,7 +432,16 @@ export const AdminPage = () => {
                       )}
                     </td>
                     <td className="py-3.5 px-5 text-xs font-bold text-slate-700">
-                      {storageService.getLocationName(st.locationId) || <span className="text-slate-300">—</span>}
+                      {st.locationId ? (
+                        <div className="flex flex-col gap-1">
+                          <span>{storageService.getLocationName(st.locationId) || <span className="text-slate-300">—</span>}</span>
+                          {regionOfStore(st.locationId)
+                            ? <span className="inline-flex items-center gap-1 w-fit text-[9px] font-black uppercase tracking-wider text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded"><MapPin className="w-2.5 h-2.5" /> {regionOfStore(st.locationId)}</span>
+                            : <span className="inline-flex items-center w-fit text-[9px] font-black uppercase tracking-wider text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">No region</span>}
+                        </div>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
                     </td>
                     <td className="py-3.5 px-5 text-center">
                       {st.active !== false ? (
@@ -409,10 +467,72 @@ export const AdminPage = () => {
         </div>
       </SectionCard>
 
+      {/* Regions overview — the whole region → stores → staff → data picture, with rename */}
+      <SectionCard
+        title="Regions"
+        subtitle="Every region and what lives in it. Rename a region to re-tag its stores and all their products, partners, invoices & serials at once. Move a store between regions from its Edit button below; move staff between stores from the Staff table above."
+        icon={Crown}
+        accent="text-amber-600"
+      >
+        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {regionRows.length === 0 && (
+            <p className="text-xs font-semibold text-slate-400 col-span-full text-center py-6">
+              No regions yet — add a store below and give it a region.
+            </p>
+          )}
+          {regionRows.map(({ team, stores, staffCount, counts }) => (
+            <div key={team} className="border-2 border-slate-200 rounded-xl p-4 bg-white flex flex-col gap-3">
+              <div className="flex items-start justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg">
+                  <MapPin className="w-3.5 h-3.5" /> {team}
+                </span>
+                <button
+                  onClick={() => openRenameRegion(team)}
+                  className="p-1.5 rounded-lg bg-slate-100 hover:bg-amber-100 text-slate-600 hover:text-amber-700 transition-colors shadow-sm flex-shrink-0"
+                  title={`Rename "${team}" everywhere`}
+                >
+                  <Edit3 className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1">
+                  {stores.length} store{stores.length === 1 ? '' : 's'} · {staffCount} staff
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {stores.map((s) => (
+                    <span
+                      key={s.id}
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${s.active !== false ? 'text-slate-700 bg-slate-50 border-slate-200' : 'text-slate-400 bg-slate-50 border-slate-200 line-through'}`}
+                    >
+                      {s.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-1.5 text-center pt-1 border-t border-slate-100">
+                {[
+                  { label: 'Products', n: counts.products },
+                  { label: 'Partners', n: counts.customers },
+                  { label: 'Invoices', n: counts.invoices },
+                  { label: 'Serials', n: counts.serials }
+                ].map(({ label, n }) => (
+                  <div key={label}>
+                    <div className="font-heading font-black text-sm text-slate-900">{n}</div>
+                    <div className="text-[9px] font-black uppercase tracking-wider text-slate-400">{label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+
       {/* Teams */}
       <SectionCard
-        title="Teams"
-        subtitle="Each team is an isolated world — its own products, partners, invoices & serials. Assign staff to a team above. Deactivate instead of deleting."
+        title="Stores"
+        subtitle="Each store belongs to a region and shares that region's data. Assign staff to a store above. Deactivate instead of deleting."
         icon={MapPin}
         accent="text-emerald-600"
         actions={
@@ -882,6 +1002,79 @@ export const AdminPage = () => {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* --- RENAME REGION MODAL --- */}
+      <Modal
+        isOpen={showRenameModal}
+        onClose={() => setShowRenameModal(false)}
+        title={`Rename Region — ${renameFrom}`}
+        subtitle="Re-tags this region across every store and all its products, partners, invoices & serials at once."
+        icon={Crown}
+      >
+        {renameResult ? (
+          <div className="space-y-4 font-body">
+            <div className="flex items-center gap-2 text-emerald-700 font-black text-sm">
+              <CheckCircle2 className="w-5 h-5" /> Region renamed to “{renameTo.trim()}”.
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-center">
+              {[
+                { label: 'Stores', n: renameResult.locations },
+                { label: 'Products', n: renameResult.products },
+                { label: 'Partners', n: renameResult.customers },
+                { label: 'Invoices', n: renameResult.invoices },
+                { label: 'Serials', n: renameResult.serials },
+                ...(renameResult.serialsFailed ? [{ label: 'Serials failed', n: renameResult.serialsFailed }] : [])
+              ].map(({ label, n }) => (
+                <div key={label} className="border-2 border-slate-200 rounded-xl p-3 bg-slate-50">
+                  <div className="font-heading font-black text-lg text-slate-900">{n}</div>
+                  <div className="text-[10px] font-black uppercase tracking-wider text-slate-500">{label}</div>
+                </div>
+              ))}
+            </div>
+            {renameResult.serialsFailed > 0 && (
+              <p className="text-[11px] font-bold text-amber-600 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" /> Some serials couldn’t be re-tagged (offline or a sync error) — reopen Rename to retry.
+              </p>
+            )}
+            <div className="pt-3 flex justify-end border-t-2 border-slate-200">
+              <button onClick={() => setShowRenameModal(false)} className="btn btn-primary font-bold px-6 py-2.5">Done</button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleRenameRegion} className="space-y-4 font-body">
+            <div className="form-group mb-0">
+              <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">New region name</label>
+              <input
+                type="text"
+                value={renameTo}
+                onChange={(e) => setRenameTo(e.target.value)}
+                placeholder="e.g. UAE"
+                className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
+                autoFocus
+                required
+              />
+              <p className="text-[10px] font-semibold text-slate-500 mt-1">
+                Every store and record currently tagged “{renameFrom}” will move to the new name. Renaming onto an existing region merges them.
+              </p>
+            </div>
+
+            {renameError && (
+              <p className="text-xs font-bold text-red-500 flex items-center gap-1.5" role="alert">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" /> {renameError}
+              </p>
+            )}
+
+            <div className="pt-4 flex justify-end gap-3 border-t-2 border-slate-200">
+              <button type="button" onClick={() => setShowRenameModal(false)} className="btn btn-outline font-bold px-5 py-2.5">
+                Cancel
+              </button>
+              <button type="submit" disabled={renameSaving} className="btn btn-primary font-bold px-6 py-2.5 shadow-md disabled:opacity-60">
+                {renameSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Edit3 className="w-4 h-4" />} Rename Region
+              </button>
+            </div>
+          </form>
+        )}
       </Modal>
 
       {/* --- INVOICE DETAILS MODAL FOR QUERIES --- */}

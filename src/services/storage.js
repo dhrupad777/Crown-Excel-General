@@ -1105,6 +1105,78 @@ class StorageService {
     return report;
   }
 
+  // Counts of business records per region — powers the admin Regions overview. Reads the local
+  // mirror, which for an admin holds every team's data. Returns { [team]: {products, customers,
+  // invoices, serials} }.
+  getTeamDataCounts() {
+    const blank = () => ({ products: 0, customers: 0, invoices: 0, serials: 0 });
+    const out = {};
+    const bump = (team, key) => {
+      const t = team || '';
+      if (!t) return;
+      (out[t] || (out[t] = blank()))[key]++;
+    };
+    this.getProducts().forEach(p => bump(p.teamId, 'products'));
+    this.getCustomers().forEach(c => bump(c.teamId, 'customers'));
+    this.getInvoices().forEach(i => bump(i.teamId, 'invoices'));
+    this.getSerials().forEach(s => bump(s.teamId, 'serials'));
+    return out;
+  }
+
+  // Renames a region EVERYWHERE at once: every store in it, plus every product / partner / invoice /
+  // serial tagged with it, are re-stamped from `oldName` to `newName`. Admin-only (the rules let an
+  // admin rewrite these, including the serial teamId-migration exception). If `newName` is an
+  // existing region the two are effectively merged — the caller must confirm that. Returns counts.
+  async renameTeam(oldName, newName) {
+    if (this._currentUser?.role !== 'admin') throw new Error('Only an administrator can rename a region.');
+    const from = String(oldName || '').trim();
+    const to = String(newName || '').trim();
+    if (!from) throw new Error('Missing the region to rename.');
+    if (!to) throw new Error('Enter the new region name.');
+    if (from === to) return { unchanged: true, locations: 0, products: 0, customers: 0, invoices: 0, serials: 0, serialsFailed: 0 };
+    const report = { locations: 0, products: 0, customers: 0, invoices: 0, serials: 0, serialsFailed: 0 };
+
+    // 1. Stores (saveLocation mirrors + syncs each).
+    for (const loc of this.getLocations()) {
+      if ((loc.team || '') === from) {
+        await this.saveLocation({ ...loc, team: to });
+        report.locations++;
+      }
+    }
+
+    // 2. Products / partners / invoices — merge-write only the ones that changed.
+    const restamp = (key, collection) => {
+      const changed = [];
+      const rows = this._readRaw(key).map(r => {
+        if (r.teamId === from) { const nr = { ...r, teamId: to }; changed.push(nr); return nr; }
+        return r;
+      });
+      this._setItem(key, rows);
+      changed.forEach(r => { firebaseService.saveToCloud(collection, r.id, r); });
+      return changed.length;
+    };
+    report.products = restamp(STORAGE_KEYS.PRODUCTS, 'products');
+    report.customers = restamp(STORAGE_KEYS.CUSTOMERS, 'customers');
+    report.invoices = restamp(STORAGE_KEYS.INVOICES, 'invoices');
+
+    // 3. Serials are create-only; teamId is changed via the admin update path (rules migration
+    // exception permits touching ONLY teamId). Sequential + awaited so a failure is counted.
+    for (const s of [...this._serialsCache]) {
+      if (s.teamId !== from) continue;
+      try {
+        await firebaseService.updateDocStrict('serials', s.id, { teamId: to });
+        report.serials++;
+      } catch {
+        report.serialsFailed++;
+      }
+    }
+    this._serialsCache = this._serialsCache.map(s => (s.teamId === from ? { ...s, teamId: to } : s));
+
+    this.appendAudit('region.rename', { team: from }, { team: to, ...report }, { entity: 'region', entityId: to });
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
+    return report;
+  }
+
   exportAllData() {
     // Raw reads so a full backup includes archived (soft-deleted) records too — a backup should
     // never quietly drop data that's still recoverable in the app.
