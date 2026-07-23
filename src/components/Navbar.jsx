@@ -29,6 +29,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
   const [stats, setStats] = useState(storageService.getDashboardStats());
   const [currentTime, setCurrentTime] = useState(new Date());
   const [syncIssue, setSyncIssue] = useState(null);
+  const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
     const handleNetwork = (e) => setIsOnline(e.detail?.online ?? navigator.onLine);
@@ -44,11 +45,19 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     window.addEventListener('crown-sync-error', handleSyncError);
     window.addEventListener('crown-storage-error', handleSyncError);
 
-    // Refresh stats & clock; self-clear a stale sync warning after 30s of quiet.
+    // Unconfirmed writes are tracked durably; keep a live count in the chrome.
+    const handlePending = () => setPendingCount(storageService.getPendingCount());
+    window.addEventListener('crown-pending-change', handlePending);
+    window.addEventListener('crown-issue', handlePending);
+    handlePending();
+
+    // Refresh stats & clock. The sync warning deliberately does NOT self-clear: an error that
+    // disappears on a timer is an error nobody fixes. It stays until the write actually succeeds.
     const interval = setInterval(() => {
       setStats(storageService.getDashboardStats());
       setCurrentTime(new Date());
-      setSyncIssue((cur) => (cur && Date.now() - cur.at > 30000 ? null : cur));
+      setPendingCount(storageService.getPendingCount());
+      setSyncIssue((cur) => (cur && storageService.getPendingCount() === 0 ? null : cur));
     }, 1000);
 
     return () => {
@@ -56,6 +65,8 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       window.removeEventListener('crown-data-change', handleDataChange);
       window.removeEventListener('crown-sync-error', handleSyncError);
       window.removeEventListener('crown-storage-error', handleSyncError);
+      window.removeEventListener('crown-pending-change', handlePending);
+      window.removeEventListener('crown-issue', handlePending);
       clearInterval(interval);
     };
   }, []);
@@ -195,11 +206,24 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
         <div className="p-4 border-t-2 border-slate-200 bg-slate-50 flex flex-col gap-2">
 
           {/* A save that didn't reach the cloud — surfaced so it can never be silently lost.
-              Only shows on a real (non-transient) failure and clears itself once things recover. */}
+              This does NOT expire on a timer: it stays until every pending write actually syncs. */}
           {syncIssue && (
             <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-50 border-2 border-red-300 text-[11px] font-black text-red-600" title={syncIssue.message} role="alert">
               <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
               <span className="truncate">A save didn't sync — check connection</span>
+            </div>
+          )}
+
+          {/* Records saved locally but not yet confirmed by the cloud. Visible by design so an
+              unconfirmed record can never masquerade as safely stored. */}
+          {pendingCount > 0 && (
+            <div
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border-2 border-amber-300 text-[11px] font-black text-amber-700"
+              title="Saved on this device, waiting for the cloud to confirm. Admin → Data Health can retry these."
+              role="status"
+            >
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse flex-shrink-0" />
+              <span className="truncate">{pendingCount} change{pendingCount === 1 ? '' : 's'} awaiting sync</span>
             </div>
           )}
 

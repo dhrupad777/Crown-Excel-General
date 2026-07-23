@@ -17,6 +17,12 @@ const message =
   `Update ${new Date().toLocaleString('sv').slice(0, 16)}`; // e.g. "Update 2026-07-08 14:30"
 
 try {
+  // Safety gate: these tests encode the invariants behind real data-loss incidents (unique ids
+  // under bulk load, region stamping, registration completeness, confirmed writes). If one breaks,
+  // nothing ships — a silent regression here costs real records.
+  console.log('\n▶  Running the safety tests…');
+  run('npm test');
+
   console.log('\n▶  Building the app…');
   run('npm run build');
 
@@ -38,7 +44,7 @@ try {
   console.log(`    ${SITE}\n`);
 } catch {
   console.error(
-    '\n❌  Ship stopped at the step above. Nothing was pushed to GitHub if the build or deploy failed.\n' +
+    '\n❌  Ship stopped at the step above. Nothing was pushed to GitHub if the tests, build or deploy failed.\n' +
     '    Fix the reported error, then run `npm run ship` again.\n'
   );
   process.exit(1);

@@ -330,7 +330,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
         customer: selectedCustomer,
         items: items
       };
-      saved = storageService.saveInvoice(invoiceData);
+      // confirm:true — a finalized sale must be acknowledged by the cloud before we celebrate it.
+      // Reporting success on a bill the server rejected is the failure mode this whole guard exists
+      // to prevent.
+      saved = await storageService.saveInvoice(invoiceData, { confirm: true });
+    } catch (err) {
+      audioService.playError();
+      alert(`This bill was NOT saved to the cloud and has not been finalized:\n\n${err.message}\n\nCheck your connection and try again — nothing has been lost.`);
+      return;
     } finally {
       setFinalizing(false);
     }

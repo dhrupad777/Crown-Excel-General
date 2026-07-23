@@ -163,6 +163,17 @@ class FirebaseService {
     }
   }
 
+  // Same write, but AWAITED and THROWING. Use wherever reporting success before the cloud has
+  // accepted the record would be a lie the operator can't detect — a finalized bill, a bulk
+  // import. saveToCloud's swallow-and-continue is only appropriate for background mirroring.
+  async saveToCloudStrict(collectionName, id, data) {
+    if (!this.isInitialized || !this.db) {
+      throw new Error('Cloud database is not connected.');
+    }
+    await setDoc(doc(this.db, collectionName, id), data, { merge: true });
+    return true;
+  }
+
   async deleteFromCloud(collectionName, id) {
     if (!this.isInitialized || !this.db) return false;
     try {

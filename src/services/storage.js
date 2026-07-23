@@ -13,7 +13,11 @@ const STORAGE_KEYS = {
   INVOICE_COUNTER: 'crown_excel_invoice_counter_v2',
   STAFF: 'crown_excel_staff_v2',
   LOCATIONS: 'crown_excel_locations_v2',
-  DEVICE_ID: 'crown_excel_device_id_v2'
+  DEVICE_ID: 'crown_excel_device_id_v2',
+  // Writes saved locally but not yet confirmed by the cloud, plus permanently-failed ones.
+  // Durable on purpose: these must outlive a refresh, or an unconfirmed record is lost silently.
+  PENDING: 'crown_excel_pending_writes_v2',
+  ISSUES: 'crown_excel_sync_issues_v2'
 };
 
 const INVOICE_NUMBER_START = 10000;
@@ -85,6 +89,12 @@ class StorageService {
     this._syncStarted = false;
     this._serialsCache = [];
     this._currentUser = null;
+    // Keys whose local JSON failed to parse — mutations refuse to overwrite these (see _readRawSafe).
+    this._corruptKeys = new Set();
+    // Retry anything left unconfirmed as soon as the device is back online.
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => { this.retryPendingWrites(); });
+    }
   }
 
   // Identity of the logged-in operator, stamped onto serial registrations, audit entries and
@@ -120,6 +130,46 @@ class StorageService {
   // landed as 25 records. Same idiom as the audit/duplicate-attempt ids below.
   _newId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // --- PRE-WRITE VALIDATION ---------------------------------------------------------
+  // Mirrors what firestore.rules will accept, checked BEFORE the write so a rejection surfaces as
+  // a clear message at the point of action instead of a swallowed permission-denied. This exact
+  // drift is what made every serial on a company-only partner's bill fail silently: the app made
+  // Company the only required partner field while the rules still demanded a non-empty
+  // `customer.name`. Keep this in step with the matching match-blocks in firestore.rules.
+  validateRecord(collection, record) {
+    const problems = [];
+    const text = (v) => String(v ?? '').trim();
+
+    if (collection === 'products') {
+      if (!text(record?.name)) problems.push('product name is required');
+      if (text(record?.name).length > 500) problems.push('product name is too long (max 500)');
+      if (!text(record?.teamId)) problems.push('region (team) is required — the record would be invisible to every store');
+    }
+    if (collection === 'customers') {
+      if (!text(record?.company) && !text(record?.name)) problems.push('a company or contact name is required');
+      if (!text(record?.teamId)) problems.push('region (team) is required — the record would be invisible to every store');
+    }
+    if (collection === 'invoices') {
+      if (!text(record?.invoiceNo) && !text(record?.id)) problems.push('invoice number is required');
+      if (!text(record?.teamId)) problems.push('region (team) is required — the bill would be invisible to every store');
+    }
+    if (collection === 'serials') {
+      if (!text(record?.serial)) problems.push('serial number is required');
+      if (!text(record?.productName)) problems.push('product name is required');
+      // firestore.rules accepts EITHER identifier — keep both sides in agreement.
+      if (!text(record?.customer?.name) && !text(record?.customer?.company)) {
+        problems.push('the partner needs a company or contact name');
+      }
+      if (!text(record?.teamId)) problems.push('region (team) is required');
+      if (typeof record?.locationId !== 'string') problems.push('locationId must be a string');
+    }
+
+    if (problems.length) {
+      throw new Error(`Cannot save this ${collection.replace(/s$/, '')}: ${problems.join('; ')}.`);
+    }
+    return true;
   }
 
   // --- Team (tenant) identity ---
@@ -183,18 +233,20 @@ class StorageService {
     // longer push local seed data to the cloud (it would be un-teamed and rejected by the rules).
     const team = this._isAdmin() ? null : this._currentTeamId();
 
+    // NOTE: each snapshot REPLACES the mirror, so any record the cloud hasn't accepted yet must be
+    // merged back in (_mergePending) — otherwise the resync silently erases it.
     firebaseService.subscribeToCollection('products', (cloudProducts) => {
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(cloudProducts || []));
+      this._setItem(STORAGE_KEYS.PRODUCTS, this._mergePending('products', cloudProducts || []));
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
     }, team);
 
     firebaseService.subscribeToCollection('customers', (cloudCustomers) => {
-      localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(cloudCustomers || []));
+      this._setItem(STORAGE_KEYS.CUSTOMERS, this._mergePending('customers', cloudCustomers || []));
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
     }, team);
 
     firebaseService.subscribeToCollection('invoices', (cloudInvoices) => {
-      localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(cloudInvoices || []));
+      this._setItem(STORAGE_KEYS.INVOICES, this._mergePending('invoices', cloudInvoices || []));
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
     }, team);
 
@@ -232,13 +284,137 @@ class StorageService {
 
   // Raw list read INCLUDING soft-deleted (archived) records. Used by every mutation so that
   // writing the list back never drops archived rows; the public getters below hide them.
+  //
+  // A parse failure is NOT an empty collection. Returning [] on corruption made a collection look
+  // empty, and the next mutation happily wrote that truncated list back — destroying the mirror.
+  // Now it flags the read as unreadable so mutations refuse to overwrite (see _readRawSafe).
   _readRaw(key) {
     try {
       const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : [];
     } catch (e) {
+      console.error(`Local data for [${key}] is unreadable:`, e);
+      window.dispatchEvent(new CustomEvent('crown-storage-error', {
+        detail: { key, error: `Local data for ${key} is corrupted and could not be read.` }
+      }));
+      this._corruptKeys.add(key);
       return [];
     }
+  }
+
+  // Throws when the underlying list could not be parsed, so a mutation can abort instead of
+  // persisting a partial list over good data. The cloud snapshot repairs the mirror on next sync.
+  _readRawSafe(key) {
+    this._corruptKeys.delete(key);
+    const rows = this._readRaw(key);
+    if (this._corruptKeys.has(key)) {
+      throw new Error(`Local data for ${key} is corrupted — refusing to overwrite it. Reload to resync from the cloud.`);
+    }
+    return rows;
+  }
+
+  // --- PENDING WRITES ---------------------------------------------------------------
+  // Every non-critical save is mirrored locally and pushed to the cloud in the background. Until
+  // the cloud confirms, the record lives here so that (a) it is retried, (b) it is visibly
+  // "pending" in the UI, and (c) the incoming onSnapshot — which REPLACES the whole mirror —
+  // cannot erase a record the cloud has not accepted yet. That erasure is precisely how a 65-row
+  // import became 25 rows.
+  _readPending() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.PENDING);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+
+  _writePending(map) {
+    try { localStorage.setItem(STORAGE_KEYS.PENDING, JSON.stringify(map)); } catch { /* quota */ }
+    window.dispatchEvent(new CustomEvent('crown-pending-change', { detail: { count: Object.keys(map).length } }));
+  }
+
+  getPendingWrites() {
+    return Object.values(this._readPending());
+  }
+
+  getPendingCount() {
+    return Object.keys(this._readPending()).length;
+  }
+
+  // True when this specific record has not been confirmed by the cloud yet (drives the amber dot).
+  isPending(collection, id) {
+    return Boolean(this._readPending()[`${collection}/${id}`]);
+  }
+
+  _markPending(collection, id, record) {
+    const map = this._readPending();
+    map[`${collection}/${id}`] = { collection, id, record, at: Date.now(), attempts: (map[`${collection}/${id}`]?.attempts || 0) };
+    this._writePending(map);
+  }
+
+  _clearPending(collection, id) {
+    const map = this._readPending();
+    if (map[`${collection}/${id}`]) {
+      delete map[`${collection}/${id}`];
+      this._writePending(map);
+    }
+  }
+
+  // Records a permanent problem for the operator. Unlike the old 30s-expiring banner these persist
+  // until an admin resolves them — an error that disappears on a timer is an error nobody fixes.
+  logIssue(kind, message, meta = {}) {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(STORAGE_KEYS.ISSUES) || '[]'); } catch { list = []; }
+    list.unshift({ id: this._newId('issue'), kind, message, meta, at: new Date().toISOString() });
+    try { localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list.slice(0, 200))); } catch { /* quota */ }
+    window.dispatchEvent(new CustomEvent('crown-issue', { detail: { kind, message } }));
+  }
+
+  getIssues() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ISSUES) || '[]'); } catch { return []; }
+  }
+
+  clearIssues() {
+    try { localStorage.removeItem(STORAGE_KEYS.ISSUES); } catch { /* ignore */ }
+    window.dispatchEvent(new CustomEvent('crown-issue', { detail: { cleared: true } }));
+  }
+
+  // Background push for a non-critical save: mark pending, write, clear on success. A failure is
+  // left pending (and retried) rather than silently dropped.
+  _syncInBackground(collection, id, record) {
+    this._markPending(collection, id, record);
+    firebaseService.saveToCloudStrict(collection, id, record)
+      .then(() => this._clearPending(collection, id))
+      .catch((err) => {
+        const map = this._readPending();
+        const entry = map[`${collection}/${id}`];
+        if (entry) { entry.attempts = (entry.attempts || 0) + 1; entry.error = err.message; this._writePending(map); }
+        this.logIssue('sync', `Could not save ${collection}/${id}: ${err.message}`, { collection, id });
+      });
+  }
+
+  // Retries everything still pending (called on reconnect and from Data Health).
+  async retryPendingWrites() {
+    const entries = this.getPendingWrites();
+    const result = { retried: entries.length, ok: 0, failed: 0 };
+    for (const e of entries) {
+      try {
+        await firebaseService.saveToCloudStrict(e.collection, e.id, e.record);
+        this._clearPending(e.collection, e.id);
+        result.ok += 1;
+      } catch {
+        result.failed += 1;
+      }
+    }
+    return result;
+  }
+
+  // Overlays still-pending records on top of an incoming cloud snapshot so a record the cloud has
+  // not accepted yet survives the resync instead of vanishing from under the operator.
+  _mergePending(collection, cloudRows) {
+    const pending = this.getPendingWrites().filter((p) => p.collection === collection);
+    if (pending.length === 0) return cloudRows;
+    const byId = new Map(cloudRows.map((r) => [r.id, r]));
+    pending.forEach((p) => { if (!byId.has(p.id)) byId.set(p.id, { ...p.record, _pendingSync: true }); });
+    return [...byId.values()];
   }
 
   // --- PRODUCTS ---
@@ -260,8 +436,11 @@ class StorageService {
     return products.some(p => p.barcode?.trim() === barcode?.trim() && p.id !== excludeId);
   }
 
-  saveProduct(product) {
-    const products = this._readRaw(STORAGE_KEYS.PRODUCTS);
+  // `confirm: true` awaits the cloud write and THROWS on failure — use it wherever reporting
+  // success before the cloud accepted the record would mislead the operator (bulk import).
+  // Otherwise the save stays instant and is tracked as pending until the cloud confirms it.
+  saveProduct(product, { confirm = false } = {}) {
+    const products = this._readRawSafe(STORAGE_KEYS.PRODUCTS);
     let updated;
     const isNew = !product.id || !products.some(p => p.id === product.id);
     const existing = isNew ? null : products.find(p => p.id === product.id);
@@ -274,6 +453,8 @@ class StorageService {
       teamId: product.teamId || existing?.teamId || this._currentTeamId()
     };
 
+    this.validateRecord('products', savedProd);
+
     if (!isNew) {
       updated = products.map(p => p.id === savedProd.id ? savedProd : p);
     } else {
@@ -284,9 +465,11 @@ class StorageService {
     if (!this._setItem(STORAGE_KEYS.PRODUCTS, updated)) return null;
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'products' } }));
 
-    // 2. Live Cloud Firebase Sync
-    firebaseService.saveToCloud('products', savedProd.id, savedProd);
-
+    // 2. Cloud — awaited when the caller needs certainty, tracked as pending otherwise.
+    if (confirm) {
+      return firebaseService.saveToCloudStrict('products', savedProd.id, savedProd).then(() => savedProd);
+    }
+    this._syncInBackground('products', savedProd.id, savedProd);
     return savedProd;
   }
 
@@ -402,8 +585,9 @@ class StorageService {
     );
   }
 
-  saveCustomer(customer) {
-    const customers = this._readRaw(STORAGE_KEYS.CUSTOMERS);
+  // See saveProduct for the `confirm` contract.
+  saveCustomer(customer, { confirm = false } = {}) {
+    const customers = this._readRawSafe(STORAGE_KEYS.CUSTOMERS);
     let updated;
     const isNew = !customer.id || !customers.some(c => c.id === customer.id);
     const existing = isNew ? null : customers.find(c => c.id === customer.id);
@@ -415,6 +599,8 @@ class StorageService {
       teamId: customer.teamId || existing?.teamId || this._currentTeamId()
     };
 
+    this.validateRecord('customers', savedCust);
+
     if (!isNew) {
       updated = customers.map(c => c.id === savedCust.id ? savedCust : c);
     } else {
@@ -425,9 +611,11 @@ class StorageService {
     if (!this._setItem(STORAGE_KEYS.CUSTOMERS, updated)) return null;
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
 
-    // 2. Live Cloud Firebase Sync
-    firebaseService.saveToCloud('customers', savedCust.id, savedCust);
-
+    // 2. Cloud — awaited when the caller needs certainty, tracked as pending otherwise.
+    if (confirm) {
+      return firebaseService.saveToCloudStrict('customers', savedCust.id, savedCust).then(() => savedCust);
+    }
+    this._syncInBackground('customers', savedCust.id, savedCust);
     return savedCust;
   }
 
@@ -581,8 +769,10 @@ class StorageService {
     return `INV-${next}-${this._deviceId()}`;
   }
 
-  saveInvoice(invoice) {
-    const invoices = this._readRaw(STORAGE_KEYS.INVOICES);
+  // See saveProduct for the `confirm` contract. A finalized bill should always use confirm:true —
+  // celebrating a sale the cloud never accepted is the worst version of this failure.
+  saveInvoice(invoice, { confirm = false } = {}) {
+    const invoices = this._readRawSafe(STORAGE_KEYS.INVOICES);
     let updated;
     const isNew = !invoice.id || !invoices.some(i => i.id === invoice.id);
     const me = this._currentUser || {};
@@ -638,15 +828,19 @@ class StorageService {
 
     }
 
+    this.validateRecord('invoices', savedInv);
+
     // 1. Instant 0ms Local Save — the invoice write is the source of truth for this bill,
     // so a failure here must be surfaced to the operator rather than swallowed.
     if (!this._setItem(STORAGE_KEYS.INVOICES, updated)) return null;
 
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
 
-    // 2. Live Cloud Firebase Sync
-    firebaseService.saveToCloud('invoices', savedInv.id, savedInv);
-
+    // 2. Cloud — awaited when the caller needs certainty, tracked as pending otherwise.
+    if (confirm) {
+      return firebaseService.saveToCloudStrict('invoices', savedInv.id, savedInv).then(() => savedInv);
+    }
+    this._syncInBackground('invoices', savedInv.id, savedInv);
     return savedInv;
   }
 
@@ -748,6 +942,179 @@ class StorageService {
       missing: rows.length - registered,
       duplicatesInFile: rows.reduce((n, r) => n + r.duplicateInFile, 0)
     };
+  }
+
+  // --- DATA HEALTH ------------------------------------------------------------------
+  // Computes what SHOULD be true and compares it to what IS, rather than trusting stored counts.
+  // Every past incident here was invisible because nothing reconciled the two: 524 billed serials
+  // vs 208 registered was only ever caught by eye. Returns a list of findings, worst first.
+  async runDataHealthCheck({ includeCloudCounts = true } = {}) {
+    const products = this.getProducts();
+    const customers = this.getCustomers();
+    const invoices = this.getInvoices();
+    const serials = this.getSerials();
+    const validTeams = new Set(this.getTeams());
+    const findings = [];
+
+    // 1. Warranty completeness — the 524-vs-208 check, automated.
+    const registered = new Set(serials.map((s) => normalizeSerial(s.serial || s.id)));
+    let billedTotal = 0;
+    let missingTotal = 0;
+    const underRegistered = [];
+    invoices.forEach((inv) => {
+      const items = (inv.items || []).filter((i) => String(i.imei || '').trim());
+      if (!items.length) return;
+      const miss = items.filter((i) => !registered.has(normalizeSerial(i.imei))).length;
+      billedTotal += items.length;
+      missingTotal += miss;
+      if (miss > 0) {
+        underRegistered.push({ id: inv.id, label: inv.invoiceNo || inv.id, billed: items.length, missing: miss, teamId: inv.teamId || '' });
+      }
+    });
+    findings.push({
+      key: 'warranty',
+      title: 'Warranty registrations',
+      severity: missingTotal > 0 ? 'error' : 'ok',
+      summary: missingTotal > 0
+        ? `${missingTotal} of ${billedTotal} billed serials are not in the registry`
+        : `All ${billedTotal} billed serials are registered`,
+      items: underRegistered,
+      repair: missingTotal > 0 ? 'registerMissingSerials' : null
+    });
+
+    // 2. Missing / unknown region — these records are invisible to every store user.
+    const badTeam = (r) => !String(r.teamId || '').trim() || !validTeams.has(r.teamId);
+    const untagged = [
+      ...products.filter(badTeam).map((r) => ({ collection: 'products', id: r.id, label: r.name, teamId: r.teamId || '' })),
+      ...customers.filter(badTeam).map((r) => ({ collection: 'customers', id: r.id, label: r.company || r.name, teamId: r.teamId || '' })),
+      ...invoices.filter(badTeam).map((r) => ({ collection: 'invoices', id: r.id, label: r.invoiceNo || r.id, teamId: r.teamId || '' })),
+      ...serials.filter(badTeam).map((r) => ({ collection: 'serials', id: r.id, label: r.serial, teamId: r.teamId || '' }))
+    ];
+    findings.push({
+      key: 'region',
+      title: 'Region assignment',
+      severity: untagged.length > 0 ? 'error' : 'ok',
+      summary: untagged.length > 0
+        ? `${untagged.length} record(s) have no valid region — invisible to store users`
+        : 'Every record belongs to a valid region',
+      items: untagged.slice(0, 200)
+    });
+
+    // 3. Duplicates that shouldn't exist.
+    const dupOf = (list, keyFn) => {
+      const seen = new Map();
+      const dups = [];
+      list.forEach((r) => {
+        const k = keyFn(r);
+        if (!k) return;
+        if (seen.has(k)) dups.push({ id: r.id, label: k });
+        else seen.set(k, r);
+      });
+      return dups;
+    };
+    const dupIds = [
+      ...dupOf(products, (p) => p.id), ...dupOf(customers, (c) => c.id), ...dupOf(invoices, (i) => i.id)
+    ];
+    const dupBarcodes = dupOf(products, (p) => String(p.barcode || '').trim());
+    const dupPhones = dupOf(customers, (c) => String(c.whatsapp || '').replace(/[^0-9]/g, ''));
+    const dupTotal = dupIds.length + dupBarcodes.length + dupPhones.length;
+    findings.push({
+      key: 'duplicates',
+      title: 'Duplicates',
+      severity: dupIds.length > 0 ? 'error' : dupTotal > 0 ? 'warn' : 'ok',
+      summary: dupTotal === 0
+        ? 'No duplicate ids, barcodes or partner numbers'
+        : `${dupIds.length} duplicate id(s), ${dupBarcodes.length} barcode(s), ${dupPhones.length} partner number(s)`,
+      items: [...dupIds.map((d) => ({ ...d, kind: 'id' })), ...dupBarcodes.map((d) => ({ ...d, kind: 'barcode' })), ...dupPhones.map((d) => ({ ...d, kind: 'phone' }))]
+    });
+
+    // 4. Orphaned references.
+    const productIds = new Set(products.map((p) => p.id));
+    const customerIds = new Set(customers.map((c) => c.id));
+    const orphans = [];
+    invoices.forEach((inv) => {
+      if (inv.customer?.id && !customerIds.has(inv.customer.id)) {
+        orphans.push({ id: inv.id, label: `${inv.invoiceNo || inv.id} → partner missing`, kind: 'customer' });
+      }
+      (inv.items || []).forEach((it) => {
+        const pid = it.productId || it.id;
+        if (pid && !productIds.has(pid)) orphans.push({ id: inv.id, label: `${inv.invoiceNo || inv.id} → ${it.name || pid}`, kind: 'product' });
+      });
+    });
+    findings.push({
+      key: 'orphans',
+      title: 'Orphaned references',
+      severity: orphans.length > 0 ? 'warn' : 'ok',
+      summary: orphans.length > 0 ? `${orphans.length} reference(s) point at deleted records` : 'All references resolve',
+      items: orphans.slice(0, 100)
+    });
+
+    // 5. Unconfirmed / failed writes.
+    const pending = this.getPendingWrites();
+    findings.push({
+      key: 'pending',
+      title: 'Unsynced changes',
+      severity: pending.some((p) => p.attempts > 0) ? 'error' : pending.length > 0 ? 'warn' : 'ok',
+      summary: pending.length === 0 ? 'Everything is synced to the cloud' : `${pending.length} change(s) not yet confirmed by the cloud`,
+      items: pending.map((p) => ({ id: p.id, label: `${p.collection}/${p.id}`, error: p.error || '', attempts: p.attempts || 0 })),
+      repair: pending.length > 0 ? 'retryPending' : null
+    });
+
+    // 6. Local vs cloud counts — catches mirror/cloud divergence directly.
+    if (includeCloudCounts) {
+      const pairs = [['products', products.length], ['customers', customers.length], ['invoices', invoices.length], ['serials', serials.length]];
+      const mismatches = [];
+      for (const [name, localCount] of pairs) {
+        const cloudCount = await firebaseService.getCollectionCount(name);
+        // Non-admins only sync their own region, so a smaller local count is expected for them.
+        if (cloudCount != null && this._isAdmin() && cloudCount !== localCount) {
+          mismatches.push({ id: name, label: name, local: localCount, cloud: cloudCount });
+        }
+      }
+      findings.push({
+        key: 'counts',
+        title: 'Local vs cloud totals',
+        severity: mismatches.length > 0 ? 'warn' : 'ok',
+        summary: mismatches.length > 0
+          ? mismatches.map((m) => `${m.label}: ${m.local} local vs ${m.cloud} cloud`).join(' · ')
+          : 'Local mirror matches the cloud',
+        items: mismatches
+      });
+    }
+
+    // 7. Local storage headroom — invoices carry full item arrays, so this fills faster than expected.
+    let bytes = 0;
+    try {
+      Object.values(STORAGE_KEYS).forEach((k) => { bytes += (localStorage.getItem(k) || '').length; });
+    } catch { /* ignore */ }
+    const mb = bytes / (1024 * 1024);
+    findings.push({
+      key: 'storage',
+      title: 'Device storage',
+      severity: mb > 4 ? 'error' : mb > 3 ? 'warn' : 'ok',
+      summary: `${mb.toFixed(2)} MB used locally${mb > 3 ? ' — approaching the browser limit (~5 MB)' : ''}`,
+      items: []
+    });
+
+    const rank = { error: 0, warn: 1, ok: 2 };
+    findings.sort((a, b) => rank[a.severity] - rank[b.severity]);
+    return { findings, checkedAt: new Date().toISOString() };
+  }
+
+  // Repairs every under-registered bill in one pass (the Data Health "warranty" repair).
+  async repairMissingRegistrations() {
+    const totals = { invoices: 0, registered: 0, duplicates: 0, failed: 0 };
+    const registered = new Set(this.getSerials().map((s) => normalizeSerial(s.serial || s.id)));
+    for (const inv of this.getInvoices()) {
+      const items = (inv.items || []).filter((i) => String(i.imei || '').trim());
+      if (!items.length || items.every((i) => registered.has(normalizeSerial(i.imei)))) continue;
+      const res = await this.registerSerialsFromInvoice(inv);
+      totals.invoices += 1;
+      totals.registered += res.registered.length;
+      totals.duplicates += res.duplicates.length;
+      totals.failed += res.failed.length;
+    }
+    return totals;
   }
 
   // Partial, combinable free-text search across every reportable dimension (mirrors the

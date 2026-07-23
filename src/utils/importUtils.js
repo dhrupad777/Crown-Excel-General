@@ -162,7 +162,10 @@ export const importProducts = async (rows, { onDuplicate = 'skip', defaultTeamId
   const seenInFile = new Set();
   const validTeams = storageService.getTeams();
 
-  rows.forEach((row, i) => {
+  // Sequential + awaited on purpose: a row counts as imported only once the CLOUD has accepted it.
+  // Counting optimistically is how a 65-row import once reported success while 40 rows were lost.
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
     const rowNumber = i + 2; // +1 for header row, +1 for 1-indexing — matches what Excel shows
     const name = pickField(row, ['devicename', 'productname', 'name', 'model']);
     const barcode = pickField(row, ['barcode']);
@@ -172,47 +175,51 @@ export const importProducts = async (rows, { onDuplicate = 'skip', defaultTeamId
 
     if (!name) {
       result.errors.push({ rowNumber, reason: 'Missing product name', raw: row });
-      return;
+      continue;
     }
     if (barcode && seenInFile.has(barcode)) {
       result.errors.push({ rowNumber, reason: `Barcode ${barcode} appears more than once in this file`, raw: row });
-      return;
+      continue;
     }
     const region = resolveRegion(row, defaultTeamId, validTeams);
     if (region.error) {
       result.errors.push({ rowNumber, reason: region.error, raw: row });
-      return;
+      continue;
     }
     if (barcode) seenInFile.add(barcode);
 
     const category = VALID_CATEGORIES.find((c) => c.toLowerCase() === rawCategory.toLowerCase()) || 'General';
     const match = barcode ? byBarcode.get(barcode) : null;
 
-    if (match) {
-      if (onDuplicate === 'skip') {
-        result.skipped += 1;
-        return;
-      }
-      // teamId is intentionally NOT overwritten on update — a product keeps its owning region.
-      storageService.saveProduct({ ...match, name, sku: sku || match.sku || '', category, unit });
-      result.updated += 1;
-    } else {
-      const saved = storageService.saveProduct({
-        name,
-        sku,
-        barcode: barcode || undefined,
-        category,
-        unit,
-        teamId: region.teamId || undefined
-      });
-      if (saved) {
-        byBarcode.set(String(saved.barcode).trim(), saved);
-        result.created += 1;
+    try {
+      if (match) {
+        if (onDuplicate === 'skip') {
+          result.skipped += 1;
+          continue;
+        }
+        // teamId is intentionally NOT overwritten on update — a product keeps its owning region.
+        await storageService.saveProduct({ ...match, name, sku: sku || match.sku || '', category, unit }, { confirm: true });
+        result.updated += 1;
       } else {
-        result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });
+        const saved = await storageService.saveProduct({
+          name,
+          sku,
+          barcode: barcode || undefined,
+          category,
+          unit,
+          teamId: region.teamId || undefined
+        }, { confirm: true });
+        if (saved) {
+          byBarcode.set(String(saved.barcode).trim(), saved);
+          result.created += 1;
+        } else {
+          result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });
+        }
       }
+    } catch (err) {
+      result.errors.push({ rowNumber, reason: `Not saved: ${err.message}`, raw: row });
     }
-  });
+  }
 
   return result;
 };
@@ -231,7 +238,10 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
   const seenInFile = new Set();
   const validTeams = storageService.getTeams();
 
-  rows.forEach((row, i) => {
+  // Sequential + awaited on purpose — see importProducts. A row is only "created" once the cloud
+  // has confirmed it; anything else is reported as an error row rather than counted as a success.
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
     const rowNumber = i + 2;
     const name = pickField(row, ['customername', 'contactname', 'name']);
     const whatsapp = pickField(row, ['whatsapp', 'phone', 'mobile', 'contactnumber']);
@@ -240,12 +250,12 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
 
     if (!company) {
       result.errors.push({ rowNumber, reason: 'Missing company (the only required field)', raw: row });
-      return;
+      continue;
     }
     const region = resolveRegion(row, defaultTeamId, validTeams);
     if (region.error) {
       result.errors.push({ rowNumber, reason: region.error, raw: row });
-      return;
+      continue;
     }
 
     // Identity key: phone → email → company, so rows without a phone are still de-duplicated
@@ -254,7 +264,7 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
     const dupKey = phoneKey || (email ? `e:${email.toLowerCase()}` : `c:${company.trim().toLowerCase()}`);
     if (seenInFile.has(dupKey)) {
       result.errors.push({ rowNumber, reason: `Duplicate of an earlier row in this file (${whatsapp || email || company})`, raw: row });
-      return;
+      continue;
     }
     seenInFile.add(dupKey);
 
@@ -263,32 +273,39 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
       || byCompany.get(company.trim().toLowerCase())
       || null;
 
-    if (match) {
-      if (onDuplicate === 'skip') {
-        result.skipped += 1;
-        return;
-      }
-      // teamId is intentionally NOT overwritten on update — a partner keeps its owning region.
-      storageService.saveCustomer({
-        ...match,
-        name: name || match.name,
-        company,
-        whatsapp: whatsapp || match.whatsapp,
-        email: email || match.email
-      });
-      result.updated += 1;
-    } else {
-      const saved = storageService.saveCustomer({ name, company, whatsapp, email, teamId: region.teamId || undefined });
-      if (saved) {
-        if (phoneKey) byPhone.set(phoneKey, saved);
-        if (email) byEmail.set(email.toLowerCase(), saved);
-        byCompany.set(company.trim().toLowerCase(), saved);
-        result.created += 1;
+    try {
+      if (match) {
+        if (onDuplicate === 'skip') {
+          result.skipped += 1;
+          continue;
+        }
+        // teamId is intentionally NOT overwritten on update — a partner keeps its owning region.
+        await storageService.saveCustomer({
+          ...match,
+          name: name || match.name,
+          company,
+          whatsapp: whatsapp || match.whatsapp,
+          email: email || match.email
+        }, { confirm: true });
+        result.updated += 1;
       } else {
-        result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });
+        const saved = await storageService.saveCustomer(
+          { name, company, whatsapp, email, teamId: region.teamId || undefined },
+          { confirm: true }
+        );
+        if (saved) {
+          if (phoneKey) byPhone.set(phoneKey, saved);
+          if (email) byEmail.set(email.toLowerCase(), saved);
+          byCompany.set(company.trim().toLowerCase(), saved);
+          result.created += 1;
+        } else {
+          result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });
+        }
       }
+    } catch (err) {
+      result.errors.push({ rowNumber, reason: `Not saved: ${err.message}`, raw: row });
     }
-  });
+  }
 
   return result;
 };

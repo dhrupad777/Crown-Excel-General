@@ -22,6 +22,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
+import { DataHealthPanel } from '../components/DataHealthPanel';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
@@ -466,6 +467,9 @@ export const AdminPage = () => {
           </table>
         </div>
       </SectionCard>
+
+      {/* Data Health — reconciles records against the cloud and surfaces anything that drifted. */}
+      <DataHealthPanel />
 
       {/* Regions overview — the whole region → stores → staff → data picture, with rename */}
       <SectionCard
