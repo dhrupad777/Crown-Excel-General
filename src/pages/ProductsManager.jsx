@@ -21,6 +21,7 @@ import {
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { ImportExcelModal } from '../components/ImportExcelModal';
+import TeamTag from '../components/TeamTag';
 import { guessProductDefaults } from '../utils/productDefaults';
 import { importProducts, PRODUCT_TEMPLATE_HEADERS } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, exportToPdf, formatLocalDate } from '../utils/exportUtils';
@@ -289,8 +290,8 @@ export const ProductsManager = () => {
               title="Filter by team — admins see every team"
             >
               <option value="all">All Teams</option>
-              {storageService.getActiveLocations().map((loc) => (
-                <option key={loc.id} value={loc.id}>{loc.name}</option>
+              {storageService.getTeams().map((team) => (
+                <option key={team} value={team}>{team}</option>
               ))}
             </select>
           )}
@@ -334,6 +335,7 @@ export const ProductsManager = () => {
                 <tr>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider w-36">Barcode</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Device Model & Specs</th>
+                  {isAdmin && <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Team</th>}
                   {isAdmin && <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>}
                 </tr>
               </thead>
@@ -363,6 +365,11 @@ export const ProductsManager = () => {
                         <span>Unit: {prod.unit || 'Box'}</span>
                       </div>
                     </td>
+                    {isAdmin && (
+                      <td className="py-4 px-6">
+                        <TeamTag team={prod.teamId} />
+                      </td>
+                    )}
                     {isAdmin && (
                       <td className="py-4 px-6 text-right">
                         <div className="flex items-center justify-end gap-2">

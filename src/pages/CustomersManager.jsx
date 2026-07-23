@@ -18,6 +18,7 @@ import {
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
 import { ImportExcelModal } from '../components/ImportExcelModal';
+import TeamTag from '../components/TeamTag';
 import { importCustomers, CUSTOMER_TEMPLATE_HEADERS } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, exportToPdf, formatLocalDate } from '../utils/exportUtils';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
@@ -246,8 +247,8 @@ export const CustomersManager = () => {
             title="Filter by team — admins see every team"
           >
             <option value="all">All Teams</option>
-            {storageService.getActiveLocations().map((loc) => (
-              <option key={loc.id} value={loc.id}>{loc.name}</option>
+            {storageService.getTeams().map((team) => (
+              <option key={team} value={team}>{team}</option>
             ))}
           </select>
         )}
@@ -279,6 +280,7 @@ export const CustomersManager = () => {
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">WhatsApp / Phone #</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Email Address</th>
                   <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-center">Total Bills</th>
+                  {isAdmin && <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider">Team</th>}
                   {isAdmin && <th className="py-4 px-6 text-[11px] font-black text-slate-600 uppercase tracking-wider text-right">Actions</th>}
                 </tr>
               </thead>
@@ -316,6 +318,11 @@ export const CustomersManager = () => {
                     <td className="py-4 px-6 text-center font-mono text-xs font-bold text-slate-800">
                       <span className="bg-slate-100 text-slate-800 font-bold px-2.5 py-1 rounded-full border border-slate-200">{cust.ordersCount || 0} bills</span>
                     </td>
+                    {isAdmin && (
+                      <td className="py-4 px-6">
+                        <TeamTag team={cust.teamId} />
+                      </td>
+                    )}
                     {isAdmin && (
                       <td className="py-4 px-6 text-right">
                         <div className="flex items-center justify-end gap-2">

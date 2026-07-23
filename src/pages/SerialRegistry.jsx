@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
+import TeamTag from '../components/TeamTag';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { useAuth } from '../context/AuthContext';
 import { exportSerialsXlsx, exportSerialsCsv, exportSerialsPdf, formatLocalDate } from '../utils/exportUtils';
@@ -34,6 +35,7 @@ export const SerialRegistry = () => {
 
   // Combinable filters
   const [searchQuery, setSearchQuery] = useState('');
+  const [teamFilter, setTeamFilter] = useState('all'); // admin-only region (Dubai/Nigeria) filter
   const [locationFilter, setLocationFilter] = useState('all');
   const [userFilter, setUserFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all'); // all | today | week | month | custom
@@ -79,6 +81,7 @@ export const SerialRegistry = () => {
 
   const filteredSerials = serials.filter((s) => {
     if (searchQuery.trim() && !textMatchIds.has(s.id)) return false;
+    if (isAdmin && teamFilter !== 'all' && (s.teamId || '') !== teamFilter) return false;
     if (locationFilter !== 'all' && s.locationId !== locationFilter) return false;
     if (userFilter !== 'all' && (s.createdBy || '') !== userFilter) return false;
 
@@ -255,8 +258,26 @@ export const SerialRegistry = () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Non-admins only ever see their own team's serials (the sync is team-scoped), so the
-                Team picker is admin-only — it lets an admin narrow the all-teams view to one team. */}
+            {/* Non-admins only ever see their own team's serials (the sync is team-scoped), so both
+                pickers are admin-only. Region narrows to a team (Dubai/Nigeria); Location narrows
+                further to a single store within any team. */}
+            {isAdmin && (
+              <div className="relative">
+                <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <select
+                  value={teamFilter}
+                  onChange={(e) => setTeamFilter(e.target.value)}
+                  className="input-field pl-8 pr-8 py-2.5 text-xs font-bold text-slate-800 bg-white border-slate-300 rounded-xl"
+                  title="Filter by team / region"
+                >
+                  <option value="all">All Teams</option>
+                  {storageService.getTeams().map((team) => (
+                    <option key={team} value={team}>{team}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {isAdmin && (
               <div className="relative">
                 <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -264,8 +285,9 @@ export const SerialRegistry = () => {
                   value={locationFilter}
                   onChange={(e) => setLocationFilter(e.target.value)}
                   className="input-field pl-8 pr-8 py-2.5 text-xs font-bold text-slate-800 bg-white border-slate-300 rounded-xl"
+                  title="Filter by store location"
                 >
-                  <option value="all">All Teams</option>
+                  <option value="all">All Locations</option>
                   {locations.map((loc) => (
                     <option key={loc.id} value={loc.id}>{loc.name}</option>
                   ))}
@@ -430,6 +452,7 @@ export const SerialRegistry = () => {
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Customer</th>
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Invoice #</th>
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Location</th>
+                  {isAdmin && <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Team</th>}
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Registered By</th>
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Date &amp; Time</th>
                   <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Remarks</th>
@@ -464,6 +487,11 @@ export const SerialRegistry = () => {
                       {s.invoiceNo || <span className="text-slate-300">—</span>}
                     </td>
                     <td className="py-3.5 px-4 text-xs font-bold text-slate-700">{s.locationName || s.locationId}</td>
+                    {isAdmin && (
+                      <td className="py-3.5 px-4">
+                        <TeamTag team={s.teamId} />
+                      </td>
+                    )}
                     <td className="py-3.5 px-4">
                       <div className="text-xs font-bold text-slate-700">{s.registeredByName || s.createdBy}</div>
                       {s.source === 'billing' && (

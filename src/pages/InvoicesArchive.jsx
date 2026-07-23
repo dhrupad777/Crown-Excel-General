@@ -25,6 +25,7 @@ import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate, countInvoiceUnits } from '../utils/exportUtils';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 import { InvoicePrintDocument } from '../components/InvoicePrintDocument';
+import TeamTag from '../components/TeamTag';
 import { useAuth } from '../context/AuthContext';
 import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
@@ -398,8 +399,8 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
               title="Filter by team — admins see every team"
             >
               <option value="all">All Teams</option>
-              {storageService.getActiveLocations().map((loc) => (
-                <option key={loc.id} value={loc.id}>{loc.name}</option>
+              {storageService.getTeams().map((team) => (
+                <option key={team} value={team}>{team}</option>
               ))}
             </select>
           )}
@@ -554,8 +555,9 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                     className="hover:bg-slate-50 cursor-pointer transition-colors group"
                   >
                     <td className="py-4 px-6">
-                      <div className="font-heading font-black text-slate-900 text-sm flex items-center gap-2">
+                      <div className="font-heading font-black text-slate-900 text-sm flex items-center gap-2 flex-wrap">
                         <span>{inv.invoiceNo || inv.id}</span>
+                        {isAdmin && <TeamTag team={inv.teamId} />}
                         {inv.query && !inv.query.resolved && (
                           <span className="inline-flex items-center gap-0.5 bg-red-50 text-red-600 border border-red-200 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded animate-pulse">
                             <AlertTriangle className="w-3 h-3 text-red-500" /> Query
@@ -647,7 +649,10 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   <p className="text-xs font-bold text-slate-500">Enterprise Laptops, Mobile Phones & Gadgets Billing</p>
                 </div>
                 <div className="text-left sm:text-right">
-                  <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.invoiceNo || selectedInvoice.id}</div>
+                  <div className="flex items-center gap-2 sm:justify-end flex-wrap">
+                    <div className="bg-blue-50 text-[#2563eb] border border-blue-200 font-mono font-bold text-xs px-3 py-1 rounded-lg inline-block">Invoice #{selectedInvoice.invoiceNo || selectedInvoice.id}</div>
+                    {isAdmin && <TeamTag team={selectedInvoice.teamId} />}
+                  </div>
                   <div className="font-mono text-xs font-bold text-slate-600 mt-1">
                     {new Date(selectedInvoice.date).toLocaleDateString()} • {new Date(selectedInvoice.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>

@@ -896,6 +896,13 @@ class StorageService {
     return this.getLocations().filter(l => l.active !== false);
   }
 
+  // Distinct region names (teams) currently in use, e.g. ['Dubai', 'Nigeria'].
+  // These values match the `teamId` stamped on every business doc, so they're the
+  // correct options for the admin cross-team filters (a location id would never match).
+  getTeams() {
+    return [...new Set(this.getActiveLocations().map(l => l.team).filter(Boolean))].sort();
+  }
+
   getLocationName(locationId) {
     return this.getLocations().find(l => l.id === locationId)?.name || '';
   }
