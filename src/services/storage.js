@@ -779,7 +779,9 @@ class StorageService {
   // deliberately NOT offline-first: uniqueness cannot be promised from a queue, so the
   // transaction (which refuses to run offline) is the mechanism as well as the check.
   // Returns { registered: [{serial}], duplicates: [{serial, existing}], failed: [{serial, error}] }.
-  async registerSerials({ product, serials, customer, invoiceNo, locationId, locationName, remarks, source = 'capture', batchId }) {
+  // `teamId` defaults to the caller's own region; pass it explicitly when re-registering another
+  // team's bill (an admin repairing a Nigeria invoice must not stamp it with the admin's region).
+  async registerSerials({ product, serials, customer, invoiceNo, locationId, locationName, remarks, source = 'capture', batchId, teamId }) {
     const user = this._currentUser || {};
     const results = { registered: [], duplicates: [], failed: [] };
     const bid = batchId || 'batch-' + Date.now();
@@ -800,13 +802,16 @@ class StorageService {
         barcode: product?.barcode || '',
         customer: {
           id: customer?.id || '',
-          name: customer?.name || '',
+          // Company is the only mandatory partner field app-side, so `name` is often blank — but the
+          // rules require a non-empty identifier on a registration. Fall back to the company so a
+          // company-only partner can't silently fail every serial with permission-denied.
+          name: String(customer?.name || '').trim() || String(customer?.company || '').trim(),
           company: customer?.company || '',
           whatsapp: customer?.whatsapp || '',
           email: customer?.email || ''
         },
         invoiceNo: invoiceNo || '',
-        teamId: this._currentTeamId(),
+        teamId: teamId || this._currentTeamId(),
         locationId: locationId || '',
         locationName: locationName || '',
         registeredByName: user.displayName || '',
@@ -873,15 +878,29 @@ class StorageService {
   // Feeds the warranty registry from a finalized bill: every line item's scanned serial becomes
   // a registration (source 'billing', grouped under the invoice number). Best-effort by design —
   // the sale is already saved; duplicates/offline failures are reported back, never thrown.
+  //
+  // Registrations run in BOUNDED-CONCURRENCY BATCHES, not one at a time. Each serial is its own
+  // server transaction (~1-2s round-trip), so a strictly sequential loop needed ~8 minutes for a
+  // 250-serial bill — and because this runs after the sale is saved, closing the tab silently
+  // truncated it (one real bill registered only 16 of 250). Batching brings that to ~seconds.
+  // Transactions target distinct docs, so parallelism cannot weaken the create-only duplicate
+  // guarantee. Safe to re-run: already-registered serials come back as `duplicates`, which is
+  // exactly how the "register missing serials" repair works.
   async registerSerialsFromInvoice(invoice) {
     const items = (invoice?.items || []).filter(it => String(it.imei || '').trim());
-    if (items.length === 0) return { registered: [], duplicates: [], failed: [] };
+    if (items.length === 0) return { registered: [], duplicates: [], failed: [], billed: 0 };
 
-    const totals = { registered: [], duplicates: [], failed: [] };
-    const storeId = this._currentUser?.locationId || '';
-    for (const item of items) {
-      const invNo = invoice.invoiceNo || invoice.id;
-      const res = await this.registerSerials({
+    const totals = { registered: [], duplicates: [], failed: [], billed: items.length };
+    const invNo = invoice.invoiceNo || invoice.id;
+    // Attribute to the BILL's own store/region, not whoever happens to be running this — an admin
+    // repairing a Nigeria invoice must not stamp those serials with the admin's own region.
+    const storeId = invoice.locationId || this._currentUser?.locationId || '';
+    const teamId = invoice.teamId || this._currentTeamId();
+
+    const CHUNK = 20;
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const slice = items.slice(i, i + CHUNK);
+      const results = await Promise.all(slice.map((item) => this.registerSerials({
         product: { id: item.productId || item.id, name: item.name, sku: item.sku || '', category: item.category || '', barcode: item.barcode || '' },
         serials: [item.imei],
         customer: invoice.customer,
@@ -890,11 +909,14 @@ class StorageService {
         locationName: this.getLocationName(storeId),
         remarks: '',
         source: 'billing',
-        batchId: invNo
+        batchId: invNo,
+        teamId
+      })));
+      results.forEach((res) => {
+        totals.registered.push(...res.registered);
+        totals.duplicates.push(...res.duplicates);
+        totals.failed.push(...res.failed);
       });
-      totals.registered.push(...res.registered);
-      totals.duplicates.push(...res.duplicates);
-      totals.failed.push(...res.failed);
     }
     return totals;
   }

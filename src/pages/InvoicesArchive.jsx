@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -10,6 +10,8 @@ import {
   Eye,
   CheckCircle2,
   Shield,
+  ShieldCheck,
+  Loader2,
   Smartphone,
   CalendarRange,
   AlertTriangle,
@@ -174,6 +176,37 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     window.addEventListener('crown-data-change', handleDataChange);
     return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
+
+  // Warranty-registration completeness per bill. Registration is best-effort and runs after the
+  // sale is saved, so it can come up short (a slow connection, or the tab closed mid-run). Compare
+  // the bill's own serials against the registry rather than trusting a stored count.
+  const registeredSerials = useMemo(
+    () => new Set(storageService.getSerials().map((s) => String(s.serial || s.id).trim().toUpperCase())),
+    [invoices]
+  );
+  const regStatus = (inv) => {
+    const items = (inv?.items || []).filter((i) => String(i.imei || '').trim());
+    const registered = items.filter((i) => registeredSerials.has(String(i.imei).trim().toUpperCase())).length;
+    return { billed: items.length, registered, missing: items.length - registered };
+  };
+
+  // Re-runs registration for this bill. Already-registered serials return as harmless duplicates,
+  // so this is safe to press repeatedly and is the repair path for under-registered invoices.
+  const [repairing, setRepairing] = useState(false);
+  const [repairResult, setRepairResult] = useState(null);
+  const handleRegisterMissing = async () => {
+    if (!selectedInvoice) return;
+    setRepairing(true);
+    setRepairResult(null);
+    try {
+      const res = await storageService.registerSerialsFromInvoice(selectedInvoice);
+      setRepairResult(res);
+      loadInvoices();
+    } catch (err) {
+      setRepairResult({ error: err.message });
+    }
+    setRepairing(false);
+  };
 
   // Open specific invoice if requested via initialInvoiceId (e.g. navigated from the dashboard
   // query alert or a finalized bill).
@@ -585,6 +618,18 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                     </td>
                     <td className="py-4 px-6 text-center font-mono text-slate-700">
                       <span className="bg-purple-50 text-purple-700 border border-purple-200 font-bold px-3 py-1 rounded-full text-xs">{inv.items?.length || 0} items</span>
+                      {(() => {
+                        const st = regStatus(inv);
+                        if (!st.billed || st.missing <= 0) return null;
+                        return (
+                          <div
+                            className="mt-1.5 inline-flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-0.5 rounded-full text-[10px] whitespace-nowrap"
+                            title={`${st.missing} of ${st.billed} serials are not in the warranty registry — open the bill to register them.`}
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {st.registered}/{st.billed} registered
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end gap-2">
@@ -664,6 +709,46 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
                   )}
                 </div>
               </div>
+
+              {/* Warranty-registration shortfall + one-click repair. Re-running is safe: serials
+                  already on record come back as duplicates and are left untouched. */}
+              {(() => {
+                const st = regStatus(selectedInvoice);
+                if (!st.billed) return null;
+                const done = st.missing <= 0;
+                if (done && !repairResult) return null;
+                return (
+                  <div className={`rounded-xl border-2 p-4 space-y-3 ${done ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-300'}`}>
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div className="text-xs font-bold flex items-start gap-2">
+                        {done ? <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" /> : <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />}
+                        <span className={done ? 'text-emerald-800' : 'text-amber-800'}>
+                          {done
+                            ? <>All <b>{st.billed}</b> serials on this bill are registered for warranty.</>
+                            : <><b>{st.missing}</b> of <b>{st.billed}</b> serials on this bill are <b>not</b> in the warranty registry.</>}
+                        </span>
+                      </div>
+                      {isAdmin && !done && (
+                        <button
+                          onClick={handleRegisterMissing}
+                          disabled={repairing}
+                          className="btn btn-primary text-xs py-2 px-4 font-bold disabled:opacity-60 flex items-center gap-2"
+                        >
+                          {repairing ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                          {repairing ? 'Registering…' : 'Register Missing Serials'}
+                        </button>
+                      )}
+                    </div>
+                    {repairResult && (
+                      <p className="text-[11px] font-bold text-slate-700">
+                        {repairResult.error
+                          ? `Could not register: ${repairResult.error}`
+                          : `Registered ${repairResult.registered.length} · already on record ${repairResult.duplicates.length}${repairResult.failed.length ? ` · failed ${repairResult.failed.length} (retry when back online)` : ''}.`}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Partner & Bill Details */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">

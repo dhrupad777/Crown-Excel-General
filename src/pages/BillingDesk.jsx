@@ -1190,9 +1190,23 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                 <Shield className="w-4 h-4 text-[#2563eb]" /> Warranty Registry
               </div>
               {!registryReport || registryReport.invoiceId !== savedInvoice.id ? (
-                <p className="text-xs font-semibold text-slate-500">Registering serial numbers…</p>
+                <p className="text-xs font-semibold text-slate-500">
+                  Registering serial numbers… <span className="font-black text-amber-600">Keep this window open until it finishes.</span>
+                </p>
               ) : (
                 <div className="text-xs font-bold space-y-1">
+                  {/* An incomplete registration used to be invisible here — the sale saves either
+                      way, so say plainly when serials are still missing and how to fix it. */}
+                  {(() => {
+                    const accounted = registryReport.registered.length + registryReport.duplicates.length;
+                    const billed = registryReport.billed || 0;
+                    if (!billed || accounted >= billed) return null;
+                    return (
+                      <p className="text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-1.5">
+                        ⚠ Only {accounted} of {billed} serials are registered. Open this bill in Invoices Archive and press “Register Missing Serials”.
+                      </p>
+                    );
+                  })()}
                   {registryReport.registered.length > 0 && (
                     <p className="text-emerald-600">✓ {registryReport.registered.length} serial{registryReport.registered.length === 1 ? '' : 's'} registered</p>
                   )}
