@@ -119,8 +119,18 @@ class StorageService {
   // create, and for non-admins only their own team's data is synced down (Firestore query +
   // firestore.rules enforce it), so the local mirror is already team-scoped. Admins sync every
   // team's data and narrow it with the UI's Team filter.
+  // The caller's TEAM is the REGION their store belongs to (each location carries a `team` field,
+  // e.g. "Dubai" or "Nigeria"). So every store in a region shares one team's data — anything a
+  // Dubai store creates is visible to all Dubai stores. Falls back to '' when unresolved.
   _currentTeamId() {
-    return this._currentUser?.locationId || '';
+    const locId = this._currentUser?.locationId;
+    if (!locId) return '';
+    return this.getLocations().find(l => l.id === locId)?.team || '';
+  }
+
+  // Public accessor for the UI (e.g. the Billing Desk stamps the bill's team).
+  getCurrentTeamId() {
+    return this._currentTeamId();
   }
 
   _isAdmin() {
@@ -738,7 +748,7 @@ class StorageService {
           email: customer?.email || ''
         },
         invoiceNo: invoiceNo || '',
-        teamId: locationId || this._currentTeamId(),
+        teamId: this._currentTeamId(),
         locationId: locationId || '',
         locationName: locationName || '',
         registeredByName: user.displayName || '',
@@ -810,16 +820,16 @@ class StorageService {
     if (items.length === 0) return { registered: [], duplicates: [], failed: [] };
 
     const totals = { registered: [], duplicates: [], failed: [] };
+    const storeId = this._currentUser?.locationId || '';
     for (const item of items) {
-      const teamId = invoice.teamId || this._currentUser?.locationId || '';
       const invNo = invoice.invoiceNo || invoice.id;
       const res = await this.registerSerials({
         product: { id: item.productId || item.id, name: item.name, sku: item.sku || '', category: item.category || '', barcode: item.barcode || '' },
         serials: [item.imei],
         customer: invoice.customer,
         invoiceNo: invNo,
-        locationId: teamId,
-        locationName: this.getLocationName(teamId),
+        locationId: storeId,
+        locationName: this.getLocationName(storeId),
         remarks: '',
         source: 'billing',
         batchId: invNo
@@ -1061,9 +1071,10 @@ class StorageService {
     this._setItem(STORAGE_KEYS.CUSTOMERS, customers);
     customers.forEach(c => { firebaseService.saveToCloud('customers', c.id, c); report.customers++; });
 
+    const regionOf = (locId) => this.getLocations().find(l => l.id === locId)?.team || '';
     const invoices = this._readRaw(STORAGE_KEYS.INVOICES).map(inv => ({
       ...inv,
-      teamId: inv.teamId || inv.locationId || catalogTeamId,
+      teamId: inv.teamId || regionOf(inv.locationId) || catalogTeamId,
       invoiceNo: inv.invoiceNo || inv.id
     }));
     this._setItem(STORAGE_KEYS.INVOICES, invoices);
@@ -1073,7 +1084,7 @@ class StorageService {
     // allows an admin to set teamId on a serial that predates the team model). Sequential + awaited.
     for (const s of [...this._serialsCache]) {
       if (s.teamId) continue;
-      const teamId = s.locationId || catalogTeamId;
+      const teamId = regionOf(s.locationId) || catalogTeamId;
       try {
         await firebaseService.updateDocStrict('serials', s.id, { teamId });
         report.serials++;

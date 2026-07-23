@@ -36,9 +36,11 @@ service cloud.firestore {
       return isBootstrapAdmin() || (signedIn() && exists(staffPath())
         && get(staffPath()).data.role == 'admin' && get(staffPath()).data.active == true);
     }
-    // The caller's team id (their staff record's locationId). Only ever called for non-admin staff
-    // (admins short-circuit before this), who always have a staff doc, so the get() is safe.
-    function myTeam() { return get(staffPath()).data.locationId; }
+    // The caller's team = the REGION of their assigned store (locations/{loc}.team), so every store
+    // in a region shares one team's data. Only ever called for non-admin staff (admins short-circuit
+    // before this), who always have a staff doc + assigned store, so the get()s are safe.
+    function myLoc() { return get(staffPath()).data.locationId; }
+    function myTeam() { return get(/databases/$(database)/documents/locations/$(myLoc())).data.team; }
     // The existing doc belongs to the caller's team (read / team-scoped update / delete).
     function ownTeam() {
       return isStaff() && exists(staffPath()) && resource.data.teamId == myTeam();

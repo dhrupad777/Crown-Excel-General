@@ -66,7 +66,7 @@ export const AdminPage = () => {
   // Location modal
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [editingLocation, setEditingLocation] = useState(null);
-  const [locationForm, setLocationForm] = useState({ name: '', code: '', address: '', active: true });
+  const [locationForm, setLocationForm] = useState({ name: '', code: '', address: '', team: '', active: true });
   const [locationError, setLocationError] = useState('');
   const [locationSaving, setLocationSaving] = useState(false);
 
@@ -204,14 +204,14 @@ export const AdminPage = () => {
 
   const openAddLocation = () => {
     setEditingLocation(null);
-    setLocationForm({ name: '', code: '', address: '', active: true });
+    setLocationForm({ name: '', code: '', address: '', team: '', active: true });
     setLocationError('');
     setShowLocationModal(true);
   };
 
   const openEditLocation = (loc) => {
     setEditingLocation(loc);
-    setLocationForm({ name: loc.name || '', code: loc.code || '', address: loc.address || '', active: loc.active !== false });
+    setLocationForm({ name: loc.name || '', code: loc.code || '', address: loc.address || '', team: loc.team || '', active: loc.active !== false });
     setLocationError('');
     setShowLocationModal(true);
   };
@@ -231,6 +231,7 @@ export const AdminPage = () => {
         name: locationForm.name.trim(),
         code: locationForm.code.trim().toUpperCase(),
         address: locationForm.address.trim(),
+        team: locationForm.team.trim(),
         active: locationForm.active
       };
       const saved = await storageService.saveLocation(record);
@@ -429,6 +430,11 @@ export const AdminPage = () => {
                   {loc.code && <span className="font-mono text-[10px] font-bold text-[#2563eb] bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">{loc.code}</span>}
                 </div>
                 {loc.address && <div className="text-[11px] font-semibold text-slate-500 mt-1">{loc.address}</div>}
+                <div className="mt-1.5">
+                  {loc.team
+                    ? <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">Team: {loc.team}</span>
+                    : <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">No team set</span>}
+                </div>
                 {loc.active === false && (
                   <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-red-500 mt-1.5"><Ban className="w-3 h-3" /> Deactivated</span>
                 )}
@@ -797,6 +803,26 @@ export const AdminPage = () => {
               onChange={(e) => setLocationForm({ ...locationForm, address: e.target.value })}
               className="input-field font-semibold text-slate-800 bg-white border-slate-300 py-2.5"
             />
+          </div>
+          <div className="form-group mb-0">
+            <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Team / Region</label>
+            <input
+              type="text"
+              value={locationForm.team}
+              onChange={(e) => setLocationForm({ ...locationForm, team: e.target.value })}
+              placeholder="e.g. Dubai"
+              list="team-region-list"
+              className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
+              required
+            />
+            <datalist id="team-region-list">
+              {[...new Set(storageService.getLocations().map((l) => l.team).filter(Boolean))].map((t) => (
+                <option key={t} value={t} />
+              ))}
+            </datalist>
+            <p className="text-[10px] font-semibold text-slate-500 mt-1">
+              All stores sharing a team see one isolated dataset (products, partners, invoices &amp; serials). Give every Dubai store the same team so they share data.
+            </p>
           </div>
           <label className={`input-field py-2.5 flex items-center gap-2 cursor-pointer font-bold ${locationForm.active ? 'text-emerald-700' : 'text-red-600'}`}>
             <input

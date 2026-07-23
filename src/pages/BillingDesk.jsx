@@ -307,9 +307,9 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       alert("Invoice number can't contain a slash (/) or be '.' or '..'. Use letters, numbers, or dashes.");
       return;
     }
-    const teamId = storageService.getCurrentUser()?.locationId || '';
+    const teamId = storageService.getCurrentTeamId();
     if (!teamId) {
-      alert("Your account isn't assigned to a team yet. Ask an administrator to set your team before billing.");
+      alert("Your store isn't assigned to a team/region yet. Ask an administrator to set your store's team before billing.");
       return;
     }
     if (storageService.isInvoiceNumberTaken(invNum, teamId)) {

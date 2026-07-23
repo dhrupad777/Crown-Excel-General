@@ -26,8 +26,8 @@ import { useAuth } from './context/AuthContext';
 
 export function App() {
   const { isAdmin, staff } = useAuth();
-  // A non-admin with no team assigned syncs nothing — surface why instead of a blank app.
-  const noTeam = !isAdmin && !staff?.locationId;
+  // A non-admin whose store has no team/region syncs nothing — surface why instead of a blank app.
+  const noTeam = !isAdmin && staff && !storageService.getCurrentTeamId();
   const [activeTab, setActiveTab] = useState('billing');
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
 
@@ -341,8 +341,8 @@ export function App() {
                   className="input-field py-2 text-xs font-bold bg-white border-slate-300 flex-1"
                 >
                   <option value="">Products &amp; partners → pick a team…</option>
-                  {storageService.getActiveLocations().map((loc) => (
-                    <option key={loc.id} value={loc.id}>{loc.name}</option>
+                  {[...new Set(storageService.getActiveLocations().map((l) => l.team).filter(Boolean))].map((t) => (
+                    <option key={t} value={t}>{t}</option>
                   ))}
                 </select>
                 <button
