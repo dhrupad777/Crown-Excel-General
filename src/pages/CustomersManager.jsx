@@ -125,13 +125,15 @@ export const CustomersManager = () => {
     setShowModal(true);
   };
 
-  const exportHeaders = ["ID", "Customer Name", "Company", "WhatsApp / Phone", "Email", "Total Orders"];
+  // "Region" is included so an export can be re-imported without losing which team owns each partner.
+  const exportHeaders = ["ID", "Customer Name", "Company", "WhatsApp / Phone", "Email", "Region", "Total Orders"];
   const exportRows = () => customers.map(c => [
     c.id,
     c.name,
     c.company || '',
     c.whatsapp,
     c.email || '',
+    c.teamId || '',
     c.ordersCount || 0
   ]);
 

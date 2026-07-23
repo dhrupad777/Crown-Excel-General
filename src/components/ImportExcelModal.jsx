@@ -3,18 +3,26 @@ import { FileSpreadsheet, Upload, Download, CheckCircle2, AlertTriangle, Loader2
 import { Modal } from './Modal';
 import { parseWorkbookFile, buildErrorReportRows } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, formatLocalDate } from '../utils/exportUtils';
+import { storageService } from '../services/storage';
+import { useAuth } from '../context/AuthContext';
 
 // Three-step bulk import wizard: pick file → preview + duplicate policy → results with a
 // downloadable error report. `onImport(rows, { onDuplicate })` does the actual writes and
 // returns { created, updated, skipped, errors } (see importUtils).
 export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders, onImport }) => {
+  const { isAdmin } = useAuth();
   const [rows, setRows] = useState(null);
   const [fileName, setFileName] = useState('');
   const [onDuplicate, setOnDuplicate] = useState('skip');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [parseError, setParseError] = useState('');
+  // Region every row lands in when its own Region cell is blank. Admins aren't tied to one region
+  // so they must choose; standard staff always import into their own.
+  const [defaultTeamId, setDefaultTeamId] = useState(() => storageService.getCurrentTeamId() || '');
   const fileInputRef = useRef(null);
+
+  const teams = storageService.getTeams();
 
   const reset = () => {
     setRows(null);
@@ -53,7 +61,7 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
   const handleRun = async () => {
     if (!rows) return;
     setBusy(true);
-    const res = await onImport(rows, { onDuplicate });
+    const res = await onImport(rows, { onDuplicate, defaultTeamId });
     setResult(res);
     setBusy(false);
   };
@@ -160,6 +168,29 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
               )}
             </div>
 
+            {isAdmin && (
+              <div className="space-y-2">
+                <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider block">
+                  Region for these rows <span className="text-red-500">*</span>
+                </span>
+                <select
+                  value={defaultTeamId}
+                  onChange={(e) => setDefaultTeamId(e.target.value)}
+                  className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5 w-full"
+                  required
+                >
+                  <option value="">Select region…</option>
+                  {teams.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] font-semibold text-slate-500">
+                  Used for every row whose <b>Region</b> column is blank. A row with its own Region value keeps that
+                  region; an unrecognised region name is reported as an error instead of being filed into the wrong team.
+                </p>
+              </div>
+            )}
+
             <div className="space-y-2">
               <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider block">If a record already exists</span>
               <div className="flex gap-3">
@@ -186,11 +217,11 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
             <button
               type="button"
               onClick={handleRun}
-              disabled={busy}
+              disabled={busy || !defaultTeamId}
               className="btn btn-primary w-full py-3 text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-60"
             >
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-              {busy ? 'Importing…' : `Import ${rows.length} Rows`}
+              {busy ? 'Importing…' : !defaultTeamId ? 'Select a region first' : `Import ${rows.length} Rows`}
             </button>
           </>
         )}

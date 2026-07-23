@@ -114,30 +114,49 @@ export const parseWorkbookFile = async (file) => {
 
 const normalizeHeader = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// Finds the first value in `row` whose (normalized) header matches any alias.
+// Finds the value in `row` whose (normalized) header matches an alias. EXACT matches win over
+// substring ones: matching loosely in column order used to grab the wrong column — a sheet with
+// "Model" before "Device Name" mapped the SKU into the product name.
 const pickField = (row, aliases) => {
-  for (const key of Object.keys(row)) {
+  const keys = Object.keys(row);
+  for (const key of keys) {
+    if (aliases.includes(normalizeHeader(key))) return String(row[key]).trim();
+  }
+  for (const key of keys) {
     const norm = normalizeHeader(key);
-    if (aliases.some((a) => norm === a || norm.includes(a))) {
-      return String(row[key]).trim();
-    }
+    if (aliases.some((a) => norm.includes(a))) return String(row[key]).trim();
   }
   return '';
 };
 
-export const PRODUCT_TEMPLATE_HEADERS = ['Barcode', 'Device Name', 'Model / SKU', 'Category', 'Unit Type'];
-export const CUSTOMER_TEMPLATE_HEADERS = ['Customer Name', 'Company', 'WhatsApp / Phone', 'Email'];
+const REGION_ALIASES = ['region', 'team'];
+
+// Resolves a row's owning region: the row's own Region cell wins, else the importer's default.
+// An unrecognised name is rejected rather than silently mis-filed into the wrong team.
+const resolveRegion = (row, defaultTeamId, validTeams) => {
+  const raw = pickField(row, REGION_ALIASES);
+  if (!raw) return { teamId: defaultTeamId || '' };
+  const match = validTeams.find((t) => t.toLowerCase() === raw.toLowerCase());
+  if (!match) {
+    return { error: `Unknown region "${raw}" — expected one of: ${validTeams.join(', ')}` };
+  }
+  return { teamId: match };
+};
+
+export const PRODUCT_TEMPLATE_HEADERS = ['Barcode', 'Device Name', 'Model / SKU', 'Category', 'Unit Type', 'Region'];
+export const CUSTOMER_TEMPLATE_HEADERS = ['Company', 'Customer Name', 'WhatsApp / Phone', 'Email', 'Region'];
 
 const VALID_CATEGORIES = ['Laptops', 'Mobile Phones', 'Tablets', 'Audio & Wearables', 'Accessories', 'Gaming', 'Peripherals', 'General'];
 
 // onDuplicate: 'update' overwrites the matched record's fields, 'skip' leaves it untouched.
 // Duplicate key for products = barcode (against the catalog AND within the file itself).
 // Returns { created, updated, skipped, errors: [{ rowNumber, reason, raw }] }.
-export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
+export const importProducts = async (rows, { onDuplicate = 'skip', defaultTeamId = '' } = {}) => {
   const result = { created: 0, updated: 0, skipped: 0, errors: [] };
   const existing = storageService.getProducts();
   const byBarcode = new Map(existing.map((p) => [String(p.barcode).trim(), p]));
   const seenInFile = new Set();
+  const validTeams = storageService.getTeams();
 
   rows.forEach((row, i) => {
     const rowNumber = i + 2; // +1 for header row, +1 for 1-indexing — matches what Excel shows
@@ -145,6 +164,7 @@ export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
     const barcode = pickField(row, ['barcode']);
     const sku = pickField(row, ['sku', 'modelsku', 'modelnumber', 'partnumber']);
     const rawCategory = pickField(row, ['category']);
+    const unit = pickField(row, ['unittype', 'unit']) || 'Box';
 
     if (!name) {
       result.errors.push({ rowNumber, reason: 'Missing product name', raw: row });
@@ -152,6 +172,11 @@ export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
     }
     if (barcode && seenInFile.has(barcode)) {
       result.errors.push({ rowNumber, reason: `Barcode ${barcode} appears more than once in this file`, raw: row });
+      return;
+    }
+    const region = resolveRegion(row, defaultTeamId, validTeams);
+    if (region.error) {
+      result.errors.push({ rowNumber, reason: region.error, raw: row });
       return;
     }
     if (barcode) seenInFile.add(barcode);
@@ -164,7 +189,8 @@ export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
         result.skipped += 1;
         return;
       }
-      storageService.saveProduct({ ...match, name, sku: sku || match.sku || '', category });
+      // teamId is intentionally NOT overwritten on update — a product keeps its owning region.
+      storageService.saveProduct({ ...match, name, sku: sku || match.sku || '', category, unit });
       result.updated += 1;
     } else {
       const saved = storageService.saveProduct({
@@ -172,7 +198,8 @@ export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
         sku,
         barcode: barcode || undefined,
         category,
-        unit: pickField(row, ['unittype', 'unit']) || 'Box'
+        unit,
+        teamId: region.teamId || undefined
       });
       if (saved) {
         byBarcode.set(String(saved.barcode).trim(), saved);
@@ -188,13 +215,17 @@ export const importProducts = async (rows, { onDuplicate = 'skip' } = {}) => {
 
 const normalizePhone = (p) => String(p).replace(/[^0-9]/g, '');
 
-// Duplicate key for customers = normalized mobile digits, falling back to email.
-export const importCustomers = async (rows, { onDuplicate = 'skip' } = {}) => {
+// Duplicate key for customers = normalized mobile digits, falling back to email, then company.
+// COMPANY is the only mandatory field — this mirrors the app's own partner form, which requires
+// company alone. (Requiring name+phone here silently rejected perfectly valid company-only rows.)
+export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamId = '' } = {}) => {
   const result = { created: 0, updated: 0, skipped: 0, errors: [] };
   const existing = storageService.getCustomers();
   const byPhone = new Map(existing.filter((c) => c.whatsapp).map((c) => [normalizePhone(c.whatsapp), c]));
   const byEmail = new Map(existing.filter((c) => c.email).map((c) => [c.email.toLowerCase(), c]));
+  const byCompany = new Map(existing.filter((c) => c.company).map((c) => [c.company.trim().toLowerCase(), c]));
   const seenInFile = new Set();
+  const validTeams = storageService.getTeams();
 
   rows.forEach((row, i) => {
     const rowNumber = i + 2;
@@ -203,33 +234,51 @@ export const importCustomers = async (rows, { onDuplicate = 'skip' } = {}) => {
     const email = pickField(row, ['email']);
     const company = pickField(row, ['company', 'business']);
 
-    if (!name) {
-      result.errors.push({ rowNumber, reason: 'Missing customer name', raw: row });
+    if (!company) {
+      result.errors.push({ rowNumber, reason: 'Missing company (the only required field)', raw: row });
       return;
     }
-    if (!whatsapp) {
-      result.errors.push({ rowNumber, reason: 'Missing mobile/WhatsApp number', raw: row });
+    const region = resolveRegion(row, defaultTeamId, validTeams);
+    if (region.error) {
+      result.errors.push({ rowNumber, reason: region.error, raw: row });
       return;
     }
-    const phoneKey = normalizePhone(whatsapp);
-    if (seenInFile.has(phoneKey)) {
-      result.errors.push({ rowNumber, reason: `Mobile ${whatsapp} appears more than once in this file`, raw: row });
-      return;
-    }
-    seenInFile.add(phoneKey);
 
-    const match = byPhone.get(phoneKey) || (email ? byEmail.get(email.toLowerCase()) : null);
+    // Identity key: phone → email → company, so rows without a phone are still de-duplicated
+    // instead of being thrown away.
+    const phoneKey = whatsapp ? normalizePhone(whatsapp) : '';
+    const dupKey = phoneKey || (email ? `e:${email.toLowerCase()}` : `c:${company.trim().toLowerCase()}`);
+    if (seenInFile.has(dupKey)) {
+      result.errors.push({ rowNumber, reason: `Duplicate of an earlier row in this file (${whatsapp || email || company})`, raw: row });
+      return;
+    }
+    seenInFile.add(dupKey);
+
+    const match = (phoneKey && byPhone.get(phoneKey))
+      || (email && byEmail.get(email.toLowerCase()))
+      || byCompany.get(company.trim().toLowerCase())
+      || null;
+
     if (match) {
       if (onDuplicate === 'skip') {
         result.skipped += 1;
         return;
       }
-      storageService.saveCustomer({ ...match, name, company: company || match.company, whatsapp, email: email || match.email });
+      // teamId is intentionally NOT overwritten on update — a partner keeps its owning region.
+      storageService.saveCustomer({
+        ...match,
+        name: name || match.name,
+        company,
+        whatsapp: whatsapp || match.whatsapp,
+        email: email || match.email
+      });
       result.updated += 1;
     } else {
-      const saved = storageService.saveCustomer({ name, company, whatsapp, email });
+      const saved = storageService.saveCustomer({ name, company, whatsapp, email, teamId: region.teamId || undefined });
       if (saved) {
-        byPhone.set(phoneKey, saved);
+        if (phoneKey) byPhone.set(phoneKey, saved);
+        if (email) byEmail.set(email.toLowerCase(), saved);
+        byCompany.set(company.trim().toLowerCase(), saved);
         result.created += 1;
       } else {
         result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });

@@ -114,6 +114,14 @@ class StorageService {
     return this._currentUser;
   }
 
+  // Unique record id. The random suffix matters: bulk import creates dozens of records inside a
+  // SINGLE millisecond, so a bare `prefix-${Date.now()}` handed them all the same id and each
+  // cloud write (setDoc merge on that id) silently overwrote the previous row — a 65-row import
+  // landed as 25 records. Same idiom as the audit/duplicate-attempt ids below.
+  _newId(prefix) {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
   // --- Team (tenant) identity ---
   // Every operator belongs to a team (their locationId). Business data is stamped with `teamId` on
   // create, and for non-admins only their own team's data is synced down (Firestore query +
@@ -259,7 +267,7 @@ class StorageService {
     const existing = isNew ? null : products.find(p => p.id === product.id);
     const savedProd = {
       ...product,
-      id: product.id || 'prod-' + Date.now(),
+      id: product.id || this._newId('prod'),
       barcode: product.barcode || Math.floor(1000000 + Math.random() * 9000000).toString(),
       // Owning team. Preserved on edit (so an admin editing another team's product can't reassign
       // it); new products inherit the creator's team.
@@ -401,7 +409,7 @@ class StorageService {
     const existing = isNew ? null : customers.find(c => c.id === customer.id);
     const savedCust = {
       ...customer,
-      id: customer.id || 'cust-' + Date.now(),
+      id: customer.id || this._newId('cust'),
       ordersCount: customer.ordersCount || 0,
       // Owning team — preserved on edit, inherited from the creator on a new partner.
       teamId: customer.teamId || existing?.teamId || this._currentTeamId()
@@ -910,7 +918,7 @@ class StorageService {
   }
 
   async saveLocation(location) {
-    const rec = { active: true, ...location, id: location.id || 'loc-' + Date.now() };
+    const rec = { active: true, ...location, id: location.id || this._newId('loc') };
     await firebaseService.updateDocStrict('locations', rec.id, rec);
 
     const mirror = this.getLocations().filter(l => l.id !== rec.id);

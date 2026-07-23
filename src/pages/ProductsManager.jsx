@@ -150,14 +150,16 @@ export const ProductsManager = () => {
     setShowModal(true);
   };
 
-  const exportHeaders = ["ID", "Barcode", "Device Name", "Model / SKU", "Category", "Unit Type"];
+  // "Region" is included so an export can be re-imported without losing which team owns each device.
+  const exportHeaders = ["ID", "Barcode", "Device Name", "Model / SKU", "Category", "Unit Type", "Region"];
   const exportRows = () => products.map(p => [
     p.id,
     p.barcode,
     p.name,
     p.sku || '',
     p.category,
-    p.unit || 'Box'
+    p.unit || 'Box',
+    p.teamId || ''
   ]);
 
   const handleExport = async (kind) => {
