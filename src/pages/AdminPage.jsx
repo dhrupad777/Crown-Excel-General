@@ -69,6 +69,7 @@ export const AdminPage = () => {
   const [locationForm, setLocationForm] = useState({ name: '', code: '', address: '', team: '', active: true });
   const [locationError, setLocationError] = useState('');
   const [locationSaving, setLocationSaving] = useState(false);
+  const [addingRegion, setAddingRegion] = useState(false); // toggles the store form's region picker into free-text "add new" mode
 
   // Audit log + duplicate attempts (fetched on demand)
   const [auditEntries, setAuditEntries] = useState([]);
@@ -205,6 +206,7 @@ export const AdminPage = () => {
   const openAddLocation = () => {
     setEditingLocation(null);
     setLocationForm({ name: '', code: '', address: '', team: '', active: true });
+    setAddingRegion(false);
     setLocationError('');
     setShowLocationModal(true);
   };
@@ -212,6 +214,7 @@ export const AdminPage = () => {
   const openEditLocation = (loc) => {
     setEditingLocation(loc);
     setLocationForm({ name: loc.name || '', code: loc.code || '', address: loc.address || '', team: loc.team || '', active: loc.active !== false });
+    setAddingRegion(false);
     setLocationError('');
     setShowLocationModal(true);
   };
@@ -806,22 +809,51 @@ export const AdminPage = () => {
           </div>
           <div className="form-group mb-0">
             <label className="text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1">Team / Region</label>
-            <input
-              type="text"
-              value={locationForm.team}
-              onChange={(e) => setLocationForm({ ...locationForm, team: e.target.value })}
-              placeholder="e.g. Dubai"
-              list="team-region-list"
-              className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
-              required
-            />
-            <datalist id="team-region-list">
-              {[...new Set(storageService.getLocations().map((l) => l.team).filter(Boolean))].map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
+            {addingRegion ? (
+              // Free-text mode: type a brand-new region name (e.g. "Dubai", "Nigeria").
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={locationForm.team}
+                  onChange={(e) => setLocationForm({ ...locationForm, team: e.target.value })}
+                  placeholder="New region name, e.g. Dubai"
+                  className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
+                  autoFocus
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => { setAddingRegion(false); setLocationForm((f) => ({ ...f, team: '' })); }}
+                  className="btn btn-outline text-xs py-2.5 px-3 font-bold whitespace-nowrap"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              // Pick an existing region (so every store in a region shares one dataset — no typo splits),
+              // or choose "Add new region…" to define one.
+              <select
+                value={locationForm.team}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') {
+                    setAddingRegion(true);
+                    setLocationForm((f) => ({ ...f, team: '' }));
+                  } else {
+                    setLocationForm({ ...locationForm, team: e.target.value });
+                  }
+                }}
+                className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5"
+                required
+              >
+                <option value="">Select region…</option>
+                {[...new Set([...storageService.getTeams(), locationForm.team].filter(Boolean))].map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+                <option value="__new__">➕ Add new region…</option>
+              </select>
+            )}
             <p className="text-[10px] font-semibold text-slate-500 mt-1">
-              All stores sharing a team see one isolated dataset (products, partners, invoices &amp; serials). Give every Dubai store the same team so they share data.
+              All stores sharing a region see one isolated dataset (products, partners, invoices &amp; serials). Give every Dubai store the same region so they share data.
             </p>
           </div>
           <label className={`input-field py-2.5 flex items-center gap-2 cursor-pointer font-bold ${locationForm.active ? 'text-emerald-700' : 'text-red-600'}`}>
