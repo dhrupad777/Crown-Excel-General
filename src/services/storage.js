@@ -594,9 +594,11 @@ class StorageService {
         ? {
             billedBy: me.email || '',
             billedByName: me.displayName || '',
-            teamId: invoice.teamId || me.locationId || '',
-            locationId: invoice.teamId || me.locationId || '',
-            locationName: this.getLocationName(invoice.teamId || me.locationId) || ''
+            // teamId = the REGION (isolation key); locationId/name = the actual STORE that billed it.
+            // Keeping these distinct so a bill still records which store issued it, not just the region.
+            teamId: invoice.teamId || this._currentTeamId() || '',
+            locationId: me.locationId || '',
+            locationName: this.getLocationName(me.locationId) || ''
           }
         : {})
     };
