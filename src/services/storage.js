@@ -1254,20 +1254,27 @@ class StorageService {
   // guarantee. Safe to re-run: already-registered serials come back as `duplicates`, which is
   // exactly how the "register missing serials" repair works.
   async registerSerialsFromInvoice(invoice) {
-    const items = (invoice?.items || []).filter(it => String(it.imei || '').trim());
-    if (items.length === 0) return { registered: [], duplicates: [], failed: [], billed: 0 };
+    const allItems = (invoice?.items || []).filter(it => String(it.imei || '').trim());
+    // Skip serials already in the registry so a continued bill (or a re-run) only writes the NEW
+    // units, not all 250 again — the registry read is what makes this idempotent AND cheap.
+    const items = allItems.filter(it => !this.findSerial(it.imei));
 
-    const totals = { registered: [], duplicates: [], failed: [], billed: items.length };
+    const totals = { registered: [], duplicates: [], failed: [], billed: allItems.length };
+    if (items.length === 0) return totals;
     const invNo = invoice.invoiceNo || invoice.id;
     // Attribute to the BILL's own store/region, not whoever happens to be running this — an admin
-    // repairing a Nigeria invoice must not stamp those serials with the admin's own region.
-    const storeId = invoice.locationId || this._currentUser?.locationId || '';
+    // repairing a Nigeria invoice must not stamp those serials with the admin's own region. The
+    // STORE, though, comes from the item that carries it (a continued bill spans stores), falling
+    // back to the bill's store then the operator's.
+    const fallbackStore = invoice.locationId || this._currentUser?.locationId || '';
     const teamId = invoice.teamId || this._currentTeamId();
 
     const CHUNK = 20;
     for (let i = 0; i < items.length; i += CHUNK) {
       const slice = items.slice(i, i + CHUNK);
-      const results = await Promise.all(slice.map((item) => this.registerSerials({
+      const results = await Promise.all(slice.map((item) => {
+        const storeId = item.locationId || fallbackStore;
+        return this.registerSerials({
         product: { id: item.productId || item.id, name: item.name, sku: item.sku || '', category: item.category || '', barcode: item.barcode || '' },
         serials: [item.imei],
         customer: invoice.customer,
@@ -1278,7 +1285,8 @@ class StorageService {
         source: 'billing',
         batchId: invNo,
         teamId
-      })));
+      });
+      }));
       results.forEach((res) => {
         totals.registered.push(...res.registered);
         totals.duplicates.push(...res.duplicates);

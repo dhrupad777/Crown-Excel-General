@@ -195,4 +195,34 @@ describe('registerSerialsFromInvoice — completeness', () => {
     });
     expect(res.billed).toBe(1);
   });
+
+  // Multi-store bill: each serial must carry ITS OWN item's store, not one bill-level store.
+  it('attributes each serial to its own item store', async () => {
+    await storageService.registerSerialsFromInvoice({
+      invoiceNo: 'X', teamId: 'Dubai', locationId: 'loc-1', customer: { company: 'ACME' },
+      items: [
+        { name: 'W', imei: 'SN-HO', locationId: 'loc-ho', locationName: 'HO' },
+        { name: 'W', imei: 'SN-SHOP', locationId: 'loc-shop', locationName: 'Shop' }
+      ]
+    });
+    const byId = Object.fromEntries(
+      firebaseService.createIfAbsent.mock.calls.map((c) => [c[2].serial, c[2].locationId])
+    );
+    expect(byId['SN-HO']).toBe('loc-ho');
+    expect(byId['SN-SHOP']).toBe('loc-shop');
+  });
+
+  // A continued bill (or a re-run) must only write the NEW units, not re-process everything.
+  it('skips serials already in the registry', async () => {
+    storageService._serialsCache = [{ id: 'SN-OLD', serial: 'SN-OLD', teamId: 'Dubai' }];
+    const res = await storageService.registerSerialsFromInvoice({
+      invoiceNo: 'X', teamId: 'Dubai', locationId: 'loc-1', customer: { company: 'ACME' },
+      items: [{ name: 'W', imei: 'SN-OLD' }, { name: 'W', imei: 'SN-NEW' }]
+    });
+    expect(res.billed).toBe(2);
+    expect(res.registered).toHaveLength(1);
+    const written = firebaseService.createIfAbsent.mock.calls.map((c) => c[2].serial);
+    expect(written).toEqual(['SN-NEW']);
+    storageService._serialsCache = [];
+  });
 });

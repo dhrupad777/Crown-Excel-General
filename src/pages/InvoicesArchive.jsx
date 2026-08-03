@@ -19,7 +19,8 @@ import {
   MapPin,
   User,
   Edit3,
-  Pencil
+  Pencil,
+  ArrowDownUp
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
@@ -37,6 +38,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [dateFilter, setDateFilter] = useState('all'); // 'all', 'today', 'week', 'month', 'custom'
   const [teamFilter, setTeamFilter] = useState('all'); // admin-only cross-team filter
+  const [sortDir, setSortDir] = useState('desc'); // date order: 'desc' = newest first
   const [customRangeStart, setCustomRangeStart] = useState(null);
   const [customRangeEnd, setCustomRangeEnd] = useState(null);
   const [showCalendarPopover, setShowCalendarPopover] = useState(false);
@@ -248,10 +250,17 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     return true;
   };
 
-  const filteredInvoices = invoices.filter(
-    (inv) => (!isAdmin || teamFilter === 'all' || (inv.teamId || '') === teamFilter)
-      && (!searchQuery.trim() || searchMatchIds.has(inv.id)) && passesDateFilter(inv)
-  );
+  const filteredInvoices = invoices
+    .filter(
+      (inv) => (!isAdmin || teamFilter === 'all' || (inv.teamId || '') === teamFilter)
+        && (!searchQuery.trim() || searchMatchIds.has(inv.id)) && passesDateFilter(inv)
+    )
+    // The mirror arrives in cloud-snapshot order (roughly doc-id), which looks random. Order by
+    // the bill's own timestamp — newest first by default, toggleable.
+    .sort((a, b) => {
+      const diff = new Date(b.date || 0) - new Date(a.date || 0);
+      return sortDir === 'desc' ? diff : -diff;
+    });
 
   // storageService.searchInvoices only sees active bills, so voided ones need their own (simpler)
   // text match — enough to keep a searched export honest.
@@ -437,6 +446,16 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
               ))}
             </select>
           )}
+
+          {/* Date sort direction — newest-first by default. */}
+          <button
+            onClick={() => setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))}
+            className="input-field py-3 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl flex items-center gap-2 whitespace-nowrap hover:border-[#2563eb]"
+            title="Toggle date order"
+          >
+            <ArrowDownUp className="w-4 h-4 text-slate-500" />
+            {sortDir === 'desc' ? 'Newest first' : 'Oldest first'}
+          </button>
 
           {/* Date Range Tabs — the calendar popover is rendered outside the
               overflow-x-auto container so it isn't clipped by the scroll boundary. */}

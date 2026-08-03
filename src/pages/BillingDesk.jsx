@@ -20,7 +20,8 @@ import {
   Zap,
   Hash,
   Package,
-  ScanLine
+  ScanLine,
+  Layers
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Modal } from '../components/Modal';
@@ -78,6 +79,15 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
   // The invoice number for this bill. Starts blank — the operator types their own number every
   // time; it's required and must be unique (both enforced on save in handleFinalizeBill).
   const [invoiceNumber, setInvoiceNumber] = useState('');
+
+  // Continue-Existing mode: append this device's units (tagged with its store) to a bill already in
+  // the region's shared database. `continuing` holds the loaded invoice; its existing items are
+  // shown locked and its number/partner are pinned. `items` still holds only THIS session's new
+  // units, so removal/dup logic stays simple and only new serials get registered.
+  const [continuing, setContinuing] = useState(null);
+  const [showContinuePicker, setShowContinuePicker] = useState(false);
+  const [continueSearch, setContinueSearch] = useState('');
+  const lockedItems = continuing?.items || [];
 
   // A bill with scanned items but no saved invoice is unfinalized work. Report that "dirty" state
   // up so App can warn before navigating away (the Billing Desk unmounts and the draft is lost),
@@ -146,7 +156,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     productSearchInputRef.current?.focus();
   };
 
-  // Every product is serial-tracked: one physical unit, one serial, one row per unit.
+  // Every product is serial-tracked: one physical unit, one serial, one row per unit. Each item
+  // records the store adding it (the logged-in device's store) so a bill continued by another
+  // store in the region keeps every unit attributed to the store that actually dispatched it.
+  const myStoreId = storageService.getCurrentUser()?.locationId || '';
+  const myStoreName = storageService.getLocationName(myStoreId);
   const addItemToBill = (product, imei = '') => {
     setItems((prev) => [{
       id: product.id + '-' + Date.now() + Math.random().toString(36).slice(2, 6),
@@ -157,7 +171,9 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       category: product.category || 'Electronics',
       qty: 1,
       unit: product.unit || 'Box',
-      imei
+      imei,
+      locationId: myStoreId,
+      locationName: myStoreName
     }, ...prev]);
   };
 
@@ -170,7 +186,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       return;
     }
 
-    const dupOnBill = items.some((it) => it.imei && it.imei.trim().toLowerCase() === serial.toLowerCase());
+    const dupOnBill = [...items, ...lockedItems].some((it) => it.imei && it.imei.trim().toLowerCase() === serial.toLowerCase());
     if (dupOnBill) {
       audioService.playError();
       setSerialWarning(`Serial "${serial}" is already on this bill.`);
@@ -307,12 +323,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       alert("Invoice number can't contain a slash (/) or be '.' or '..'. Use letters, numbers, or dashes.");
       return;
     }
-    const teamId = storageService.getCurrentTeamId();
+    const teamId = continuing ? continuing.teamId : storageService.getCurrentTeamId();
     if (!teamId) {
       alert("Your store isn't assigned to a team/region yet. Ask an administrator to set your store's team before billing.");
       return;
     }
-    if (storageService.isInvoiceNumberTaken(invNum, teamId)) {
+    // Uniqueness only applies to a NEW bill. Continuing intentionally writes back to an existing
+    // one, so skip the "already taken" guard in that mode.
+    if (!continuing && storageService.isInvoiceNumberTaken(invNum, teamId)) {
       alert(`Invoice number "${invNum}" is already used by another bill in your team. Please enter a different number.`);
       return;
     }
@@ -320,9 +338,20 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setFinalizing(true);
     let saved;
     try {
-      // Per-team invoice identity: the doc id is namespaced by team so Dubai's "INV-1" and Nigeria's
-      // "INV-1" are different documents; the human number lives in `invoiceNo`.
-      const invoiceData = {
+      const me = storageService.getCurrentUser() || {};
+      // Continuing: append this session's new units onto the existing bill's items, leaving its
+      // identity, partner and original biller untouched (saveInvoice only re-stamps on a new id).
+      const invoiceData = continuing
+        ? {
+            ...continuing,
+            items: [...(continuing.items || []), ...items],
+            appendedBy: me.email || '',
+            appendedByName: me.displayName || '',
+            updatedAt: new Date().toISOString()
+          }
+        : {
+        // Per-team invoice identity: the doc id is namespaced by team so Dubai's "INV-1" and Nigeria's
+        // "INV-1" are different documents; the human number lives in `invoiceNo`.
         id: `${teamId}__${invNum}`,
         invoiceNo: invNum,
         teamId,
@@ -358,17 +387,18 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setSavedInvoice(saved);
     setShowSuccessModal(true);
 
-    // Feed the warranty registry (best-effort — the sale is already saved; duplicates are
-    // skipped by the registry's create-only guarantee, offline failures reported for later
-    // registration via the Serial Capture screen). The report is keyed to this invoice so a
-    // slow registration can't paint its result onto the NEXT bill's success modal.
-    try {
-      const reg = await storageService.registerSerialsFromInvoice(saved);
-      setRegistryReport({ invoiceId: saved.id, ...reg });
-    } catch (err) {
-      console.warn('Warranty auto-registration failed:', err.message);
-      setRegistryReport({ invoiceId: saved.id, registered: [], duplicates: [], failed: items.map((it) => ({ serial: it.imei })) });
-    }
+    // Feed the warranty registry in the BACKGROUND — the sale is already saved and confirmed, so
+    // the operator must never wait on (or keep a window open for) registration. It updates the
+    // modal in place if still open (keyed to this invoice so a slow run can't paint onto the NEXT
+    // bill), and if the tab closes mid-run the shortfall is visible + one-click repairable in
+    // Invoices Archive and Data Health. Not awaited on purpose.
+    setRegistryReport({ invoiceId: saved.id, pending: true, registered: [], duplicates: [], failed: [], billed: (saved.items || []).length });
+    storageService.registerSerialsFromInvoice(saved)
+      .then((reg) => setRegistryReport({ invoiceId: saved.id, ...reg }))
+      .catch((err) => {
+        console.warn('Warranty auto-registration failed:', err.message);
+        setRegistryReport({ invoiceId: saved.id, registered: [], duplicates: [], failed: items.map((it) => ({ serial: it.imei })), billed: items.length });
+      });
   };
 
   const resetForNextBill = () => {
@@ -381,6 +411,28 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setSavedInvoice(null);
     setRegistryReport(null);
     setInvoiceNumber('');
+    setContinuing(null);
+  };
+
+  // Loads an existing regional invoice into "continue" mode: pin its number + partner, show its
+  // items locked, and start a fresh set of units (tagged to THIS store) to append.
+  const startContinuing = (inv) => {
+    setContinuing(inv);
+    setSelectedCustomer(inv.customer || null);
+    setInvoiceNumber(inv.invoiceNo || inv.id);
+    setItems([]);
+    setActiveProduct(null);
+    setActiveSerial('');
+    setSerialWarning('');
+    setShowContinuePicker(false);
+    setContinueSearch('');
+  };
+
+  const cancelContinuing = () => {
+    setContinuing(null);
+    setSelectedCustomer(null);
+    setInvoiceNumber('');
+    setItems([]);
   };
 
   // Generates a plausible 15-digit demo serial number for quick demo bills
@@ -497,6 +549,36 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
 
           {/* Top Control Bar: Invoice Date/Time & Manual Product Search */}
           <div className="bg-white border-2 border-slate-300 rounded-2xl p-6 space-y-5 shadow-md border-t-4 border-t-[#2563eb]">
+
+            {/* New vs Continue — continue appends this device's units (tagged to its store) to a bill
+                already in the region's shared database (created by another store). */}
+            {continuing ? (
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-50 border-2 border-amber-300 rounded-xl px-4 py-3">
+                <div className="text-xs font-bold text-amber-800 flex items-center gap-2">
+                  <Layers className="w-4 h-4 flex-shrink-0" />
+                  <span>
+                    Continuing invoice <b className="font-mono">{continuing.invoiceNo || continuing.id}</b> — {lockedItems.length} existing unit{lockedItems.length === 1 ? '' : 's'}. New units are added to your store.
+                  </span>
+                </div>
+                <button type="button" onClick={cancelContinuing} className="text-xs font-black text-amber-700 hover:text-amber-900 bg-white border-2 border-amber-300 px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider">Billing mode:</span>
+                <span className="text-xs font-black text-[#2563eb] bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg">New Invoice</span>
+                <button
+                  type="button"
+                  onClick={() => setShowContinuePicker(true)}
+                  className="text-xs font-bold text-slate-600 hover:text-[#2563eb] bg-slate-50 border-2 border-slate-200 hover:border-[#2563eb] px-2.5 py-1 rounded-lg flex items-center gap-1.5"
+                  title="Add your store's units to a bill another store already started in this region"
+                >
+                  <Layers className="w-3.5 h-3.5" /> Continue an existing invoice
+                </button>
+              </div>
+            )}
+
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b-2 border-slate-200 pb-4">
               <div className="flex items-center gap-3">
                 <div className="p-3 rounded-2xl bg-[#2563eb]/10 border border-[#2563eb]/20 text-[#2563eb] shadow-sm font-bold">
@@ -523,8 +605,9 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                     onChange={(e) => setInvoiceNumber(e.target.value)}
                     placeholder="INV-10001"
                     required
-                    className="input-field mt-0.5 py-1.5 px-2.5 w-40 text-sm font-mono font-black text-emerald-700 bg-white border-emerald-300 sm:text-right"
-                    title="Required — must be unique"
+                    disabled={!!continuing}
+                    className="input-field mt-0.5 py-1.5 px-2.5 w-40 text-sm font-mono font-black text-emerald-700 bg-white border-emerald-300 sm:text-right disabled:bg-slate-100 disabled:text-slate-500"
+                    title={continuing ? 'Fixed while continuing an existing invoice' : 'Required — must be unique'}
                   />
                 </div>
               </div>
@@ -724,7 +807,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
               )}
             </div>
 
-            {items.length === 0 ? (
+            {items.length === 0 && lockedItems.length === 0 ? (
               <div className="p-16 text-center text-slate-500 space-y-3">
                 <div className="w-16 h-16 rounded-2xl bg-slate-100 border border-slate-200 mx-auto flex items-center justify-center text-slate-400 shadow-inner">
                   <Search className="w-8 h-8 animate-pulse" />
@@ -746,6 +829,24 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
+                    {/* Existing units from the continued invoice — locked (already billed by their
+                        own store); shown for context, never re-registered or removed here. */}
+                    {lockedItems.map((item, idx) => (
+                      <tr key={`locked-${item.id || idx}`} className="bg-slate-50/60">
+                        <td className="py-3 px-4 font-mono font-bold text-xs text-slate-400">{item.barcode}</td>
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-500 text-sm">{item.name}</div>
+                          <div className="text-[11px] font-mono font-bold text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                            <span>{item.imei}</span>
+                            {item.locationName && <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded">{item.locationName}</span>}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-center font-mono text-xs font-bold text-slate-400">{item.qty}</td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">Existing</span>
+                        </td>
+                      </tr>
+                    ))}
                     {items.map((item, idx) => (
                       <tr key={item.id || idx} className="hover:bg-slate-50/80 transition-colors group">
                         <td className="py-4 px-4 font-mono font-bold text-xs text-slate-600">{item.barcode}</td>
@@ -947,6 +1048,60 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
         </div>
 
       </div>
+
+      {/* --- CONTINUE-EXISTING INVOICE PICKER --- */}
+      <Modal
+        isOpen={showContinuePicker}
+        onClose={() => { setShowContinuePicker(false); setContinueSearch(''); }}
+        title="Continue an existing invoice"
+        subtitle="Add your store's units to a bill already started in this region. Pick the invoice below."
+        icon={Layers}
+        maxWidth="max-w-xl"
+      >
+        <div className="space-y-4 font-body">
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={continueSearch}
+              onChange={(e) => setContinueSearch(e.target.value)}
+              placeholder="Search by invoice # or partner…"
+              autoFocus
+              className="input-field pl-10 py-2.5 text-sm bg-white border-slate-300 font-bold text-slate-900 w-full rounded-xl"
+            />
+          </div>
+          <div className="max-h-80 overflow-y-auto border-2 border-slate-200 rounded-xl divide-y divide-slate-100">
+            {(() => {
+              const q = continueSearch.trim().toLowerCase();
+              const list = storageService.getInvoices()
+                .filter((inv) => !q
+                  || `${inv.invoiceNo || inv.id} ${inv.customer?.company || ''} ${inv.customer?.name || ''}`.toLowerCase().includes(q))
+                .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+                .slice(0, 50);
+              if (list.length === 0) {
+                return <p className="p-6 text-center text-xs font-semibold text-slate-400">No invoices in your region match.</p>;
+              }
+              return list.map((inv) => (
+                <button
+                  key={inv.id}
+                  type="button"
+                  onClick={() => startContinuing(inv)}
+                  className="w-full text-left p-3 hover:bg-blue-50/60 transition-colors flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-mono font-black text-sm text-slate-900">{inv.invoiceNo || inv.id}</div>
+                    <div className="text-[11px] font-bold text-slate-500 truncate">{customerPrimaryName(inv.customer)}</div>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <div className="text-[11px] font-bold text-slate-600">{(inv.items || []).length} unit{(inv.items || []).length === 1 ? '' : 's'}</div>
+                    <div className="text-[10px] font-semibold text-slate-400">{new Date(inv.date).toLocaleDateString()}</div>
+                  </div>
+                </button>
+              ));
+            })()}
+          </div>
+        </div>
+      </Modal>
 
       {/* --- MODAL 1: Instant New Product Registration --- */}
       <Modal
@@ -1196,9 +1351,10 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
               <div className="flex items-center gap-2 text-xs font-black text-slate-800 uppercase tracking-wider">
                 <Shield className="w-4 h-4 text-[#2563eb]" /> Warranty Registry
               </div>
-              {!registryReport || registryReport.invoiceId !== savedInvoice.id ? (
-                <p className="text-xs font-semibold text-slate-500">
-                  Registering serial numbers… <span className="font-black text-amber-600">Keep this window open until it finishes.</span>
+              {!registryReport || registryReport.invoiceId !== savedInvoice.id || registryReport.pending ? (
+                <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                  Registering serials in the background — <span className="font-bold text-slate-600">safe to continue to the next bill.</span>
                 </p>
               ) : (
                 <div className="text-xs font-bold space-y-1">

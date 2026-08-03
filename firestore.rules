@@ -150,12 +150,24 @@ service cloud.firestore {
       allow read: if isAdmin() || ownTeam();
       allow create: if isStaff() && (isAdmin() || newOwnTeam());
       allow delete: if isAdmin();
-      // Standard staff can only raise/resolve a `query` (concern) on their own team's bill.
+      // Standard staff can either:
+      //  (a) raise/resolve a `query` (concern) on their own team's bill, or
+      //  (b) APPEND items to their own team's bill — this is the multi-store "continue an existing
+      //      invoice" flow, where another store in the same region adds its own units. Identity and
+      //      the original biller stay immutable, and items may only GROW (size can't shrink), so a
+      //      standard user can never rewrite or trim a finalized sale — only extend it.
       allow update: if isAdmin()
         || (ownTeam()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query'])
             && request.resource.data.query is map
-            && textOk(request.resource.data.query.note, 5000));
+            && textOk(request.resource.data.query.note, 5000))
+        || (ownTeam()
+            && request.resource.data.teamId == resource.data.teamId
+            && request.resource.data.invoiceNo == resource.data.invoiceNo
+            && request.resource.data.billedBy == resource.data.billedBy
+            && request.resource.data.items.size() >= resource.data.items.size()
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['items', 'registrySummary', 'updatedAt', 'appendedBy', 'appendedByName']));
     }
 
     // Shared sequence counters — legacy/unused (numbers are operator-entered per team now).
