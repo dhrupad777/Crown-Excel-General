@@ -17,8 +17,12 @@ const STORAGE_KEYS = {
   // Writes saved locally but not yet confirmed by the cloud, plus permanently-failed ones.
   // Durable on purpose: these must outlive a refresh, or an unconfirmed record is lost silently.
   PENDING: 'crown_excel_pending_writes_v2',
-  ISSUES: 'crown_excel_sync_issues_v2'
+  ISSUES: 'crown_excel_sync_issues_v2',
+  // Weekly-backup bookkeeping: last run timestamp + whether the auto-download is enabled.
+  BACKUP_META: 'crown_excel_backup_meta_v2'
 };
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 const INVOICE_NUMBER_START = 10000;
 
@@ -1630,18 +1634,56 @@ class StorageService {
     return report;
   }
 
-  exportAllData() {
-    // Raw reads so a full backup includes archived (soft-deleted) records too — a backup should
-    // never quietly drop data that's still recoverable in the app.
-    return JSON.stringify({
+  // The full backup as a plain object. Raw reads so it includes archived (soft-deleted) records
+  // too — a backup should never quietly drop data that's still recoverable in the app. This is the
+  // single source both the JSON and XML exports serialize, so the two formats can never drift.
+  getBackupBundle() {
+    return {
+      exportedAt: new Date().toISOString(),
+      counts: {
+        products: this.getProducts().length,
+        customers: this.getCustomers().length,
+        invoices: this.getInvoices().length,
+        serials: this.getSerials().length,
+        staff: this.getStaff().length,
+        locations: this.getLocations().length
+      },
       products: this._readRaw(STORAGE_KEYS.PRODUCTS),
       customers: this._readRaw(STORAGE_KEYS.CUSTOMERS),
       invoices: this._readRaw(STORAGE_KEYS.INVOICES),
       serials: this.getSerials(),
       staff: this.getStaff(),
-      locations: this.getLocations(),
-      exportedAt: new Date().toISOString()
-    }, null, 2);
+      locations: this.getLocations()
+    };
+  }
+
+  exportAllData() {
+    return JSON.stringify(this.getBackupBundle(), null, 2);
+  }
+
+  // --- WEEKLY BACKUP BOOKKEEPING -----------------------------------------------------
+  _backupMeta() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.BACKUP_META) || '{}'); } catch { return {}; }
+  }
+
+  _writeBackupMeta(patch) {
+    const next = { ...this._backupMeta(), ...patch };
+    try { localStorage.setItem(STORAGE_KEYS.BACKUP_META, JSON.stringify(next)); } catch { /* quota */ }
+    return next;
+  }
+
+  getLastBackupAt() { return this._backupMeta().lastBackupAt || null; }
+  markBackupDone() { return this._writeBackupMeta({ lastBackupAt: new Date().toISOString() }); }
+
+  // Auto weekly backup is ON unless the admin explicitly turned it off.
+  isAutoBackupEnabled() { return this._backupMeta().autoEnabled !== false; }
+  setAutoBackupEnabled(on) { return this._writeBackupMeta({ autoEnabled: !!on }); }
+
+  // Due when it's never run, or the last run was over a week ago.
+  isWeeklyBackupDue() {
+    const last = this.getLastBackupAt();
+    if (!last) return true;
+    return (Date.now() - new Date(last).getTime()) >= WEEK_MS;
   }
 
   // Restores products/customers/invoices only. Serial registrations are deliberately NOT

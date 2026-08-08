@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Database,
   RefreshCw,
@@ -7,7 +7,10 @@ import {
   ShieldCheck,
   CheckCircle2,
   Key,
-  Cloud
+  Cloud,
+  FileDown,
+  CalendarClock,
+  X
 } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { Modal } from './components/Modal';
@@ -22,6 +25,7 @@ import { RegistrationsDashboard } from './pages/RegistrationsDashboard';
 import { AdminPage } from './pages/AdminPage';
 import { storageService } from './services/storage';
 import { firebaseService } from './services/firebase';
+import { downloadFullBackup, runWeeklyBackupIfDue } from './utils/backup';
 import { useAuth } from './context/AuthContext';
 
 export function App() {
@@ -89,17 +93,46 @@ export function App() {
     }
   };
 
-  // Handle Export JSON Backup
-  const handleExportJSON = () => {
-    const dataStr = storageService.exportAllData();
-    const blob = new Blob([dataStr], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Crown_Excel_Full_Backup_${new Date().toISOString().slice(0, 10)}.json`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  // --- Local backup (JSON + XML), with a once-a-week auto-download ---
+  const [autoBackup, setAutoBackup] = useState(() => storageService.isAutoBackupEnabled());
+  const [lastBackupAt, setLastBackupAt] = useState(() => storageService.getLastBackupAt());
+  const [backupToast, setBackupToast] = useState(null); // { files: [...] } after a download
+
+  const handleDownloadBackup = (formats = ['json', 'xml']) => {
+    const files = downloadFullBackup(formats);
+    setLastBackupAt(storageService.getLastBackupAt());
+    setBackupToast({ files });
+  };
+
+  const toggleAutoBackup = () => {
+    const next = !autoBackup;
+    storageService.setAutoBackupEnabled(next);
+    setAutoBackup(next);
+  };
+
+  // Weekly auto-backup: when an admin opens the app and 7+ days have passed, download this week's
+  // JSON + XML. A browser app has no always-on server, so this can only fire while the app is open;
+  // the delay lets the initial cloud snapshot populate the mirror before we snapshot it. Best-effort
+  // (some browsers gate silent multi-file downloads) — the manual button in Settings is the fallback.
+  useEffect(() => {
+    if (!isAdmin) return;
+    const t = setTimeout(() => {
+      try {
+        if (runWeeklyBackupIfDue()) {
+          setLastBackupAt(storageService.getLastBackupAt());
+          setBackupToast({ files: [`Crown_Excel_Full_Backup_${new Date().toISOString().slice(0, 10)}.json`, 'and .xml'], auto: true });
+        }
+      } catch { /* blocked — the Settings button remains available */ }
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [isAdmin]);
+
+  const relativeBackup = (iso) => {
+    if (!iso) return 'never';
+    const days = Math.floor((Date.now() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000));
+    if (days <= 0) return 'today';
+    if (days === 1) return 'yesterday';
+    return `${days} days ago`;
   };
 
   // Handle Import JSON Backup
@@ -125,6 +158,24 @@ export function App() {
   return (
     <AuthGate>
     <div className="min-h-screen flex flex-col bg-[#f7f9fb] text-slate-900 font-body">
+
+      {/* Backup confirmation — brief, dismissible, non-blocking. */}
+      {backupToast && (
+        <div className="fixed bottom-5 right-5 z-[60] max-w-sm bg-white border-2 border-emerald-300 rounded-2xl shadow-xl p-4 flex items-start gap-3">
+          <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-black text-slate-900">
+              {backupToast.auto ? 'Weekly backup downloaded' : 'Backup downloaded'}
+            </div>
+            <div className="text-[11px] font-semibold text-slate-500 mt-0.5">
+              Saved to your Downloads folder ({backupToast.files.join(', ')}). Keep it somewhere safe.
+            </div>
+          </div>
+          <button onClick={() => setBackupToast(null)} className="text-slate-400 hover:text-slate-700 flex-shrink-0" title="Dismiss">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Sidebar & Top Navigation */}
       <Navbar
@@ -274,24 +325,61 @@ export function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={handleExportJSON}
-                className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
-              >
-                <Download className="w-4 h-4 text-emerald-600" /> Export Full Backup (JSON)
-              </button>
-              {isAdmin && (
+            {/* Weekly local backup — full dataset (products, partners, invoices, serials, staff,
+                stores) in both JSON and XML, saved to this device's Downloads folder. */}
+            <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="flex items-start gap-2">
+                  <CalendarClock className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div className="text-xs font-black text-slate-800 uppercase tracking-wider">Weekly Local Backup</div>
+                    <div className="text-[11px] font-semibold text-slate-500 mt-0.5">
+                      Full data as JSON + XML. Last backup: <b className="text-slate-700">{relativeBackup(lastBackupAt)}</b>.
+                    </div>
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600 cursor-pointer">
+                  <input type="checkbox" checked={autoBackup} onChange={toggleAutoBackup} className="accent-emerald-600" />
+                  Auto every 7 days
+                </label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button
                   type="button"
-                  onClick={handleResetDemo}
-                  className="btn btn-outline text-amber-600 border-amber-300 hover:bg-amber-50 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
+                  onClick={() => handleDownloadBackup(['json', 'xml'])}
+                  className="btn btn-primary py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
                 >
-                  <RefreshCw className="w-4 h-4" /> Reset to Demo Database
+                  <FileDown className="w-4 h-4" /> Download Now (JSON + XML)
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={() => handleDownloadBackup(['json'])}
+                  className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
+                >
+                  <Download className="w-4 h-4 text-emerald-600" /> JSON only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadBackup(['xml'])}
+                  className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
+                >
+                  <Download className="w-4 h-4 text-emerald-600" /> XML only
+                </button>
+              </div>
+              <p className="text-[10px] font-semibold text-slate-400">
+                Auto-backup runs when an admin opens the app and a week has passed (a browser app can’t back up while it’s closed). The first automatic run may ask your browser to “allow multiple downloads” — click allow once.
+              </p>
             </div>
+
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={handleResetDemo}
+                className="btn btn-outline w-full text-amber-600 border-amber-300 hover:bg-amber-50 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
+              >
+                <RefreshCw className="w-4 h-4" /> Reset to Demo Database
+              </button>
+            )}
 
             {/* Import Box (admin only — restores products/customers/invoices; the serial
                 registry is create-only in the cloud and is never restored from backups) */}

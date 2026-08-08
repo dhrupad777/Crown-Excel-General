@@ -104,6 +104,36 @@ describe('pending writes — an unconfirmed record must survive a resync', () =>
   });
 });
 
+describe('weekly backup bookkeeping', () => {
+  it('is due when it has never run', () => {
+    expect(storageService.getLastBackupAt()).toBeNull();
+    expect(storageService.isWeeklyBackupDue()).toBe(true);
+  });
+
+  it('is not due right after a backup, and due again after 7+ days', () => {
+    storageService.markBackupDone();
+    expect(storageService.getLastBackupAt()).not.toBeNull();
+    expect(storageService.isWeeklyBackupDue()).toBe(false);
+
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    localStorage.setItem('crown_excel_backup_meta_v2', JSON.stringify({ lastBackupAt: eightDaysAgo }));
+    expect(storageService.isWeeklyBackupDue()).toBe(true);
+  });
+
+  it('auto-backup is on by default and can be turned off', () => {
+    expect(storageService.isAutoBackupEnabled()).toBe(true);
+    storageService.setAutoBackupEnabled(false);
+    expect(storageService.isAutoBackupEnabled()).toBe(false);
+  });
+
+  it('the bundle carries every collection plus counts', () => {
+    const b = storageService.getBackupBundle();
+    ['products', 'customers', 'invoices', 'serials', 'staff', 'locations', 'counts', 'exportedAt'].forEach((k) => {
+      expect(b).toHaveProperty(k);
+    });
+  });
+});
+
 describe('issues — errors must not expire on a timer', () => {
   it('records and retains issues until explicitly cleared', () => {
     storageService.logIssue('sync', 'could not save customers/c1');
