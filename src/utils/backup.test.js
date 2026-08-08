@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../services/storage', () => ({
   storageService: {
-    getBackupBundle: vi.fn(),
-    markBackupDone: vi.fn(),
+    getBackupBundle: vi.fn(() => ({ products: [] })),
+    createBackupSnapshot: vi.fn(async () => ({ id: 'bk-1', createdAt: '2026-08-10', counts: {}, size: 10 })),
     isAutoBackupEnabled: vi.fn(() => true),
     isWeeklyBackupDue: vi.fn(() => true)
   }
@@ -12,7 +12,7 @@ vi.mock('./download', () => ({ downloadBlob: vi.fn() }));
 
 const { storageService } = await import('../services/storage');
 const { downloadBlob } = await import('./download');
-const { bundleToXml, downloadFullBackup, runWeeklyBackupIfDue } = await import('./backup');
+const { bundleToXml, downloadBundle, runWeeklySnapshotIfDue } = await import('./backup');
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -49,44 +49,41 @@ describe('bundleToXml', () => {
   });
 });
 
-describe('downloadFullBackup', () => {
-  beforeEach(() => storageService.getBackupBundle.mockReturnValue({ products: [{ id: 'p1' }] }));
-
-  it('writes both JSON and XML by default and marks the backup done', () => {
-    const files = downloadFullBackup();
+describe('downloadBundle', () => {
+  it('writes both JSON and XML by default', () => {
+    const files = downloadBundle({ products: [{ id: 'p1' }] });
     expect(downloadBlob).toHaveBeenCalledTimes(2);
     expect(files.some((f) => f.endsWith('.json'))).toBe(true);
     expect(files.some((f) => f.endsWith('.xml'))).toBe(true);
-    expect(storageService.markBackupDone).toHaveBeenCalled();
   });
 
-  it('honours a single requested format', () => {
-    downloadFullBackup(['json']);
+  it('honours a single requested format and a date label in the filename', () => {
+    downloadBundle({ products: [] }, ['json'], '2026-08-01');
     expect(downloadBlob).toHaveBeenCalledTimes(1);
-    expect(downloadBlob.mock.calls[0][0]).toMatch(/\.json$/);
+    expect(downloadBlob.mock.calls[0][0]).toBe('Crown_Excel_Full_Backup_2026-08-01.json');
   });
 });
 
-describe('runWeeklyBackupIfDue', () => {
-  beforeEach(() => storageService.getBackupBundle.mockReturnValue({ products: [] }));
-
-  it('runs when enabled and due', () => {
+describe('runWeeklySnapshotIfDue', () => {
+  it('captures a snapshot (not a download) when enabled and due', async () => {
     storageService.isAutoBackupEnabled.mockReturnValue(true);
     storageService.isWeeklyBackupDue.mockReturnValue(true);
-    expect(runWeeklyBackupIfDue()).toBe(true);
-    expect(downloadBlob).toHaveBeenCalled();
+    const res = await runWeeklySnapshotIfDue();
+    expect(res).toBeTruthy();
+    expect(storageService.createBackupSnapshot).toHaveBeenCalled();
+    expect(downloadBlob).not.toHaveBeenCalled(); // background snapshot, nothing downloaded
   });
 
-  it('does nothing when not due', () => {
+  it('does nothing when not due', async () => {
     storageService.isWeeklyBackupDue.mockReturnValue(false);
-    expect(runWeeklyBackupIfDue()).toBe(false);
-    expect(downloadBlob).not.toHaveBeenCalled();
+    expect(await runWeeklySnapshotIfDue()).toBeNull();
+    expect(storageService.createBackupSnapshot).not.toHaveBeenCalled();
   });
 
-  it('does nothing when auto-backup is disabled', () => {
+  it('does nothing when auto-backup is disabled', async () => {
     storageService.isAutoBackupEnabled.mockReturnValue(false);
     storageService.isWeeklyBackupDue.mockReturnValue(true);
-    expect(runWeeklyBackupIfDue()).toBe(false);
-    expect(downloadBlob).not.toHaveBeenCalled();
+    expect(await runWeeklySnapshotIfDue()).toBeNull();
+    expect(storageService.createBackupSnapshot).not.toHaveBeenCalled();
   });
 });

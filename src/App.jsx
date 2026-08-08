@@ -2,13 +2,11 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Database,
   RefreshCw,
-  Download,
   Upload,
   ShieldCheck,
   CheckCircle2,
   Key,
   Cloud,
-  FileDown,
   CalendarClock,
   X
 } from 'lucide-react';
@@ -25,7 +23,7 @@ import { RegistrationsDashboard } from './pages/RegistrationsDashboard';
 import { AdminPage } from './pages/AdminPage';
 import { storageService } from './services/storage';
 import { firebaseService } from './services/firebase';
-import { downloadFullBackup, runWeeklyBackupIfDue } from './utils/backup';
+import { runWeeklySnapshotIfDue } from './utils/backup';
 import { useAuth } from './context/AuthContext';
 
 export function App() {
@@ -93,36 +91,24 @@ export function App() {
     }
   };
 
-  // --- Local backup (JSON + XML), with a once-a-week auto-download ---
-  const [autoBackup, setAutoBackup] = useState(() => storageService.isAutoBackupEnabled());
+  // --- Backups: automatic on-device snapshots, downloaded on demand from Admin → Backups ---
   const [lastBackupAt, setLastBackupAt] = useState(() => storageService.getLastBackupAt());
-  const [backupToast, setBackupToast] = useState(null); // { files: [...] } after a download
+  const [backupToast, setBackupToast] = useState(null);
 
-  const handleDownloadBackup = (formats = ['json', 'xml']) => {
-    const files = downloadFullBackup(formats);
-    setLastBackupAt(storageService.getLastBackupAt());
-    setBackupToast({ files });
-  };
-
-  const toggleAutoBackup = () => {
-    const next = !autoBackup;
-    storageService.setAutoBackupEnabled(next);
-    setAutoBackup(next);
-  };
-
-  // Weekly auto-backup: when an admin opens the app and 7+ days have passed, download this week's
-  // JSON + XML. A browser app has no always-on server, so this can only fire while the app is open;
-  // the delay lets the initial cloud snapshot populate the mirror before we snapshot it. Best-effort
-  // (some browsers gate silent multi-file downloads) — the manual button in Settings is the fallback.
+  // Weekly auto-snapshot: when an admin opens the app and 7+ days have passed, capture a snapshot
+  // into the on-device history (NO forced download — the user grabs it from Admin → Backups). The
+  // delay lets the first cloud snapshot populate the mirror before we capture it. A browser app has
+  // no always-on server, so this can only run while the app is open; it catches up on next login.
   useEffect(() => {
     if (!isAdmin) return;
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
       try {
-        if (runWeeklyBackupIfDue()) {
+        const created = await runWeeklySnapshotIfDue();
+        if (created) {
           setLastBackupAt(storageService.getLastBackupAt());
-          setBackupToast({ files: [`Crown_Excel_Full_Backup_${new Date().toISOString().slice(0, 10)}.json`, 'and .xml'], auto: true });
+          setBackupToast({ auto: true });
         }
-      } catch { /* blocked — the Settings button remains available */ }
+      } catch { /* IndexedDB unavailable — Admin → Backups shows the manual button */ }
     }, 4000);
     return () => clearTimeout(t);
   }, [isAdmin]);
@@ -164,11 +150,9 @@ export function App() {
         <div className="fixed bottom-5 right-5 z-[60] max-w-sm bg-white border-2 border-emerald-300 rounded-2xl shadow-xl p-4 flex items-start gap-3">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
           <div className="min-w-0 flex-1">
-            <div className="text-xs font-black text-slate-900">
-              {backupToast.auto ? 'Weekly backup downloaded' : 'Backup downloaded'}
-            </div>
+            <div className="text-xs font-black text-slate-900">Weekly backup saved</div>
             <div className="text-[11px] font-semibold text-slate-500 mt-0.5">
-              Saved to your Downloads folder ({backupToast.files.join(', ')}). Keep it somewhere safe.
+              A fresh snapshot is ready in <b>Admin → Backups</b> — download it as JSON or XML anytime.
             </div>
           </div>
           <button onClick={() => setBackupToast(null)} className="text-slate-400 hover:text-slate-700 flex-shrink-0" title="Dismiss">
@@ -325,50 +309,14 @@ export function App() {
               </div>
             </div>
 
-            {/* Weekly local backup — full dataset (products, partners, invoices, serials, staff,
-                stores) in both JSON and XML, saved to this device's Downloads folder. */}
-            <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div className="flex items-start gap-2">
-                  <CalendarClock className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <div className="text-xs font-black text-slate-800 uppercase tracking-wider">Weekly Local Backup</div>
-                    <div className="text-[11px] font-semibold text-slate-500 mt-0.5">
-                      Full data as JSON + XML. Last backup: <b className="text-slate-700">{relativeBackup(lastBackupAt)}</b>.
-                    </div>
-                  </div>
-                </div>
-                <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600 cursor-pointer">
-                  <input type="checkbox" checked={autoBackup} onChange={toggleAutoBackup} className="accent-emerald-600" />
-                  Auto every 7 days
-                </label>
+            {/* Backups now live in their own place — auto-captured on-device and downloadable
+                anytime — so Settings just points there instead of forcing a download. */}
+            <div className="rounded-xl border-2 border-indigo-200 bg-indigo-50/40 p-4 flex items-start gap-2">
+              <CalendarClock className="w-4 h-4 text-indigo-600 flex-shrink-0 mt-0.5" />
+              <div className="text-[11px] font-semibold text-slate-600">
+                <b className="text-slate-800">Automatic weekly backups</b> are kept on this device and downloadable as JSON or XML from
+                <b className="text-indigo-700"> Admin → Backups</b> whenever you like. Last backup: <b className="text-slate-700">{relativeBackup(lastBackupAt)}</b>.
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleDownloadBackup(['json', 'xml'])}
-                  className="btn btn-primary py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
-                >
-                  <FileDown className="w-4 h-4" /> Download Now (JSON + XML)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDownloadBackup(['json'])}
-                  className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
-                >
-                  <Download className="w-4 h-4 text-emerald-600" /> JSON only
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDownloadBackup(['xml'])}
-                  className="btn btn-outline py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-slate-50"
-                >
-                  <Download className="w-4 h-4 text-emerald-600" /> XML only
-                </button>
-              </div>
-              <p className="text-[10px] font-semibold text-slate-400">
-                Auto-backup runs when an admin opens the app and a week has passed (a browser app can’t back up while it’s closed). The first automatic run may ask your browser to “allow multiple downloads” — click allow once.
-              </p>
             </div>
 
             {isAdmin && (

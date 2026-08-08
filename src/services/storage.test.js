@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Firebase is mocked entirely — these tests are about the local guarantees, not the network.
+// In-app backup snapshots persist bundles to IndexedDB (absent in jsdom) — mock the tiny store so
+// the orchestration (index management, pruning, deletion) is what's under test. `vi.hoisted` lets
+// the shared Map exist above the hoisted vi.mock factory.
+const { _idb } = vi.hoisted(() => ({ _idb: new Map() }));
+vi.mock('../utils/backupStore', () => ({
+  idbPutBundle: vi.fn(async (id, bundle) => { _idb.set(id, bundle); return true; }),
+  idbGetBundle: vi.fn(async (id) => _idb.get(id) || null),
+  idbDeleteBundle: vi.fn(async (id) => { _idb.delete(id); return true; })
+}));
+
 vi.mock('./firebase', () => ({
   serverTimestamp: () => 'ts',
   firebaseService: {
@@ -131,6 +141,31 @@ describe('weekly backup bookkeeping', () => {
     ['products', 'customers', 'invoices', 'serials', 'staff', 'locations', 'counts', 'exportedAt'].forEach((k) => {
       expect(b).toHaveProperty(k);
     });
+  });
+});
+
+describe('in-app backup snapshots', () => {
+  it('creates a snapshot, indexes it, and reads the bundle back', async () => {
+    const entry = await storageService.createBackupSnapshot();
+    expect(entry.id).toMatch(/^bk-/);
+    const idx = storageService.getBackupIndex();
+    expect(idx.length).toBe(1);
+    expect(idx[0].counts).toBeDefined();
+    const bundle = await storageService.getBackupSnapshotBundle(entry.id);
+    expect(bundle).toHaveProperty('products');
+  });
+
+  it('deletes a snapshot from the index and the store', async () => {
+    const entry = await storageService.createBackupSnapshot();
+    await storageService.deleteBackupSnapshot(entry.id);
+    expect(storageService.getBackupIndex().find((s) => s.id === entry.id)).toBeUndefined();
+    expect(await storageService.getBackupSnapshotBundle(entry.id)).toBeNull();
+  });
+
+  it('marks the weekly clock so a fresh snapshot is not immediately due again', async () => {
+    expect(storageService.isWeeklyBackupDue()).toBe(true);
+    await storageService.createBackupSnapshot();
+    expect(storageService.isWeeklyBackupDue()).toBe(false);
   });
 });
 

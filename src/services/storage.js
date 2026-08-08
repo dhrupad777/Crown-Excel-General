@@ -4,6 +4,7 @@
 
 import { firebaseService, serverTimestamp } from './firebase';
 import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
+import { idbPutBundle, idbGetBundle, idbDeleteBundle } from '../utils/backupStore';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'crown_excel_products_v2',
@@ -23,6 +24,7 @@ const STORAGE_KEYS = {
 };
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const BACKUP_MAX = 12; // keep a rolling ~3 months of weekly snapshots on-device
 
 const INVOICE_NUMBER_START = 10000;
 
@@ -1684,6 +1686,43 @@ class StorageService {
     const last = this.getLastBackupAt();
     if (!last) return true;
     return (Date.now() - new Date(last).getTime()) >= WEEK_MS;
+  }
+
+  // --- IN-APP BACKUP SNAPSHOTS -------------------------------------------------------
+  // A snapshot is the full backup bundle, kept ON THIS DEVICE in IndexedDB. The lightweight index
+  // (id, date, counts, size) lives in the meta blob so the Backups list renders without loading the
+  // heavy payloads. The user downloads any snapshot as JSON/XML whenever they like — nothing is
+  // pushed to their Downloads folder automatically.
+  getBackupIndex() {
+    return this._backupMeta().snapshots || [];
+  }
+
+  // Captures the current data as a new snapshot, prunes to BACKUP_MAX, and stamps the weekly clock.
+  async createBackupSnapshot() {
+    const bundle = this.getBackupBundle();
+    const id = `bk-${Date.now()}`;
+    const size = JSON.stringify(bundle).length;
+    await idbPutBundle(id, bundle);
+
+    const entry = { id, createdAt: bundle.exportedAt, counts: bundle.counts, size };
+    const all = [entry, ...this.getBackupIndex()];
+    const keep = all.slice(0, BACKUP_MAX);
+    for (const dropped of all.slice(BACKUP_MAX)) {
+      try { await idbDeleteBundle(dropped.id); } catch { /* already gone */ }
+    }
+    this._writeBackupMeta({ snapshots: keep, lastBackupAt: new Date().toISOString() });
+    window.dispatchEvent(new CustomEvent('crown-backup-change'));
+    return entry;
+  }
+
+  getBackupSnapshotBundle(id) {
+    return idbGetBundle(id);
+  }
+
+  async deleteBackupSnapshot(id) {
+    try { await idbDeleteBundle(id); } catch { /* already gone */ }
+    this._writeBackupMeta({ snapshots: this.getBackupIndex().filter((s) => s.id !== id) });
+    window.dispatchEvent(new CustomEvent('crown-backup-change'));
   }
 
   // Restores products/customers/invoices only. Serial registrations are deliberately NOT

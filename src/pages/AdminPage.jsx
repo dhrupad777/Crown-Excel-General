@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { DataHealthPanel } from '../components/DataHealthPanel';
+import { BackupsPanel } from '../components/BackupsPanel';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
@@ -470,6 +471,9 @@ export const AdminPage = () => {
 
       {/* Data Health — reconciles records against the cloud and surfaces anything that drifted. */}
       <DataHealthPanel />
+
+      {/* Backups — auto-generated on-device snapshots, downloadable as JSON/XML anytime. */}
+      <BackupsPanel />
 
       {/* Regions overview — the whole region → stores → staff → data picture, with rename */}
       <SectionCard

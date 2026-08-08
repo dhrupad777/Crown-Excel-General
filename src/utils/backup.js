@@ -1,7 +1,6 @@
-// Full local backup in JSON and XML. Both formats serialize the SAME bundle
-// (storageService.getBackupBundle) so they can never disagree. Used by the manual buttons in
-// Settings and the once-a-week auto-download (see App.jsx). Everything runs client-side and lands
-// in the browser's Downloads folder — "local" by design; there's no server involved.
+// Serializes a backup bundle to JSON/XML and triggers on-demand downloads. The bundle itself is
+// produced and stored by storageService (see getBackupBundle / createBackupSnapshot). Both formats
+// come from the SAME bundle so they can never drift. Everything is client-side.
 
 import { downloadBlob } from './download';
 import { storageService } from '../services/storage';
@@ -49,15 +48,11 @@ const valueToXml = (key, value, indent) => {
 export const bundleToXml = (bundle) =>
   `<?xml version="1.0" encoding="UTF-8"?>\n${valueToXml('crownExcelBackup', bundle, 0)}\n`;
 
-const stamp = () => new Date().toISOString().slice(0, 10);
-
-// Downloads the requested formats (JSON and/or XML). Returns the filenames written. Marks the
-// weekly-backup clock as done so the auto-trigger won't nag again until next week.
-export const downloadFullBackup = (formats = ['json', 'xml']) => {
-  const bundle = storageService.getBackupBundle();
-  const base = `Crown_Excel_Full_Backup_${stamp()}`;
+// Downloads a specific bundle in the requested formats. `label` (a date) names the file. Returns
+// the filenames written.
+export const downloadBundle = (bundle, formats = ['json', 'xml'], label) => {
+  const base = `Crown_Excel_Full_Backup_${label || new Date().toISOString().slice(0, 10)}`;
   const written = [];
-
   if (formats.includes('json')) {
     downloadBlob(`${base}.json`, new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' }));
     written.push(`${base}.json`);
@@ -66,16 +61,13 @@ export const downloadFullBackup = (formats = ['json', 'xml']) => {
     downloadBlob(`${base}.xml`, new Blob([bundleToXml(bundle)], { type: 'application/xml' }));
     written.push(`${base}.xml`);
   }
-
-  storageService.markBackupDone();
   return written;
 };
 
-// Fires the weekly backup if it's enabled and a week has elapsed. Best-effort: some browsers gate
-// programmatic multi-file downloads behind a one-time "allow" prompt, so we also surface the due
-// state to the UI (App shows a banner) rather than relying on this alone. Returns true if it ran.
-export const runWeeklyBackupIfDue = () => {
-  if (!storageService.isAutoBackupEnabled() || !storageService.isWeeklyBackupDue()) return false;
-  downloadFullBackup(['json', 'xml']);
-  return true;
+// Weekly auto-SNAPSHOT (not a download): captures a snapshot into the on-device history if the
+// feature is enabled and a week has elapsed. The user grabs it from Admin → Backups when they
+// like. Returns the new snapshot's index entry, or null if nothing was due.
+export const runWeeklySnapshotIfDue = async () => {
+  if (!storageService.isAutoBackupEnabled() || !storageService.isWeeklyBackupDue()) return null;
+  return storageService.createBackupSnapshot();
 };
