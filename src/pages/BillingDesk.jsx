@@ -30,7 +30,8 @@ import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 
-export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
+export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) => {
+  const isAdmin = storageService.getCurrentUser()?.role === 'admin';
   // Bill Items State
   const [items, setItems] = useState([]);
 
@@ -292,8 +293,12 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setCustomerSearchQuery('');
   };
 
-  // Finalize & Save Invoice
-  const handleFinalizeBill = async () => {
+  const handleFinalizeBill = () => handleSaveBill('final');
+
+  // Saves the bill either as an open DRAFT (status 'draft', 2-day window, serials NOT yet
+  // registered) or as a FINAL invoice (registers serials in the background). Continuing appends
+  // this session's units — each already tagged with the operator's store — onto an existing bill.
+  const handleSaveBill = async (mode) => {
     if (finalizing) return; // a double-click (or a second Ctrl+S) must never mint two bills
     if (items.length === 0) {
       alert("Please add at least one item to the bill.");
@@ -307,7 +312,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     const missingImei = items.filter((item) => !item.imei?.trim());
     if (missingImei.length > 0) {
       alert(
-        "Missing serial numbers — the following items need a serial number before this bill can be finalized:\n\n" +
+        "Missing serial numbers — the following items need a serial number before this bill can be saved:\n\n" +
         missingImei.map((item) => `• ${item.name}`).join('\n')
       );
       return;
@@ -334,20 +339,29 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       alert(`Invoice number "${invNum}" is already used by another bill in your team. Please enter a different number.`);
       return;
     }
+    // A draft past its 2-day window is frozen for standard staff — only an admin can act on it.
+    if (continuing && storageService.isDraftExpired(continuing) && !isAdmin) {
+      alert("This draft has passed its 2-day window — only an administrator can finalize or add to it now.");
+      return;
+    }
 
     setFinalizing(true);
     let saved;
     try {
       const me = storageService.getCurrentUser() || {};
-      // Continuing: append this session's new units onto the existing bill's items, leaving its
-      // identity, partner and original biller untouched (saveInvoice only re-stamps on a new id).
+      const finalStamp = mode === 'final'
+        ? { status: 'final', finalizedBy: me.email || '', finalizedByName: me.displayName || '', finalizedAt: new Date().toISOString() }
+        : { status: 'draft' };
+      // Continuing: append onto the existing bill's items, leaving identity/partner/biller intact.
+      // Its draftExpiresAt is preserved (hard 2-day cap from creation, not reset on each edit).
       const invoiceData = continuing
         ? {
             ...continuing,
             items: [...(continuing.items || []), ...items],
             appendedBy: me.email || '',
             appendedByName: me.displayName || '',
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
+            ...finalStamp
           }
         : {
         // Per-team invoice identity: the doc id is namespaced by team so Dubai's "INV-1" and Nigeria's
@@ -357,15 +371,15 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
         teamId,
         date: new Date().toISOString(),
         customer: selectedCustomer,
-        items: items
+        items: items,
+        ...finalStamp,
+        ...(mode === 'draft' ? { draftExpiresAt: storageService.draftExpiry() } : {})
       };
-      // confirm:true — a finalized sale must be acknowledged by the cloud before we celebrate it.
-      // Reporting success on a bill the server rejected is the failure mode this whole guard exists
-      // to prevent.
+      // confirm:true — the save must be acknowledged by the cloud before we celebrate it.
       saved = await storageService.saveInvoice(invoiceData, { confirm: true });
     } catch (err) {
       audioService.playError();
-      alert(`This bill was NOT saved to the cloud and has not been finalized:\n\n${err.message}\n\nCheck your connection and try again — nothing has been lost.`);
+      alert(`This bill was NOT saved to the cloud:\n\n${err.message}\n\nCheck your connection and try again — nothing has been lost.`);
       return;
     } finally {
       setFinalizing(false);
@@ -376,22 +390,24 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       alert("Failed to save this bill to local storage (device storage may be full). Please free up space or export a backup, then try again.");
       return;
     }
-    audioService.playSuccess();
-
-    confetti({
-      particleCount: 100,
-      spread: 80,
-      origin: { y: 0.6 }
-    });
 
     setSavedInvoice(saved);
     setShowSuccessModal(true);
 
+    if (saved.status !== 'final') {
+      // Draft saved — no confetti, no registration yet (that happens on finalize).
+      audioService.playBeep();
+      setRegistryReport(null);
+      return;
+    }
+
+    audioService.playSuccess();
+    confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
+
     // Feed the warranty registry in the BACKGROUND — the sale is already saved and confirmed, so
-    // the operator must never wait on (or keep a window open for) registration. It updates the
-    // modal in place if still open (keyed to this invoice so a slow run can't paint onto the NEXT
-    // bill), and if the tab closes mid-run the shortfall is visible + one-click repairable in
-    // Invoices Archive and Data Health. Not awaited on purpose.
+    // the operator never waits on (or keeps a window open for) registration. It updates the modal
+    // in place if still open, and any shortfall is visible + one-click repairable in Invoices
+    // Archive and Data Health. Not awaited on purpose.
     setRegistryReport({ invoiceId: saved.id, pending: true, registered: [], duplicates: [], failed: [], billed: (saved.items || []).length });
     storageService.registerSerialsFromInvoice(saved)
       .then((reg) => setRegistryReport({ invoiceId: saved.id, ...reg }))
@@ -434,6 +450,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
     setInvoiceNumber('');
     setItems([]);
   };
+
+  // The Drafts tab can deep-link a specific draft into continue mode ("Add items").
+  useEffect(() => {
+    if (!continueDraftId) return;
+    const inv = storageService.getInvoiceById(continueDraftId);
+    if (inv) startContinuing(inv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [continueDraftId]);
 
   // Generates a plausible 15-digit demo serial number for quick demo bills
   const generateDemoImei = () => Array.from({ length: 15 }, () => Math.floor(Math.random() * 10)).join('');
@@ -1023,7 +1047,8 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
               </span>
             </div>
 
-            {/* Finalize Button */}
+            {/* Finalize + Draft buttons. Save as Draft keeps the bill open for 2 days so other
+                stores in the region can add their serials before it's finalized. */}
             <button
               type="button"
               onClick={handleFinalizeBill}
@@ -1033,6 +1058,18 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
               <Sparkles className="w-5 h-5 text-yellow-300 animate-pulse" />
               <span>{finalizing ? 'Saving bill…' : 'Finalize & Save Bill (Ctrl+S)'}</span>
             </button>
+            {(!continuing || continuing.status === 'draft') && (
+              <button
+                type="button"
+                onClick={() => handleSaveBill('draft')}
+                disabled={items.length === 0 || !selectedCustomer || !invoiceNumber.trim() || finalizing}
+                title="Keep this bill open for up to 2 days so other stores can add their serials before finalizing"
+                className="btn btn-outline w-full py-3 text-sm flex items-center justify-center gap-2 font-bold rounded-xl border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+              >
+                <Layers className="w-4 h-4" />
+                <span>{continuing ? 'Save Draft (keep open)' : 'Save as Draft (open 2 days)'}</span>
+              </button>
+            )}
             {(!selectedCustomer || items.length === 0 || !invoiceNumber.trim()) && (
               <p className="text-[11px] text-center text-amber-600 font-bold">
                 ⚠️ Enter an invoice number, attach a partner, and add at least 1 item to unlock checkout.
@@ -1319,8 +1356,10 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
       <Modal
         isOpen={showSuccessModal}
         onClose={resetForNextBill}
-        title="🎉 Bill Saved!"
-        subtitle="Invoice has been saved to the database and synchronized with the cloud."
+        title={savedInvoice?.status === 'draft' ? '📝 Draft Saved!' : '🎉 Bill Saved!'}
+        subtitle={savedInvoice?.status === 'draft'
+          ? 'Kept open for 2 days — other stores can add their serials, then finalize it.'
+          : 'Invoice has been saved to the database and synchronized with the cloud.'}
         icon={Sparkles}
         maxWidth="max-w-lg"
       >
@@ -1351,7 +1390,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange }) => {
               <div className="flex items-center gap-2 text-xs font-black text-slate-800 uppercase tracking-wider">
                 <Shield className="w-4 h-4 text-[#2563eb]" /> Warranty Registry
               </div>
-              {!registryReport || registryReport.invoiceId !== savedInvoice.id || registryReport.pending ? (
+              {savedInvoice.status === 'draft' ? (
+                <p className="text-xs font-semibold text-slate-500">
+                  Serials register when this draft is <b className="text-slate-700">finalized</b> — find it under the <b className="text-amber-700">Drafts</b> tab.
+                </p>
+              ) : !registryReport || registryReport.invoiceId !== savedInvoice.id || registryReport.pending ? (
                 <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                   Registering serials in the background — <span className="font-bold text-slate-600">safe to continue to the next bill.</span>

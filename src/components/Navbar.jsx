@@ -16,7 +16,8 @@ import {
   ScanLine,
   UserCog,
   LogOut,
-  AlertTriangle
+  AlertTriangle,
+  FileEdit
 } from 'lucide-react';
 import { audioService } from '../services/audio';
 import { storageService } from '../services/storage';
@@ -82,6 +83,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       label: 'CORE PLATFORM',
       items: [
         { id: 'billing', label: 'Billing Desk', icon: Receipt, badge: 'ACTIVE' },
+        { id: 'drafts', label: 'Drafts', icon: FileEdit, count: stats.draftsCount, alert: stats.expiredDrafts },
         { id: 'invoices', label: 'Invoices Archive', icon: Archive, count: stats.invoicesCount },
         { id: 'products', label: 'Products & IMEIs', icon: Package, count: stats.productsCount },
         { id: 'customers', label: 'Customers CRM', icon: Users, count: stats.customersCount },
@@ -109,6 +111,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
   const getPageTitle = () => {
     switch (activeTab) {
       case 'billing': return 'Billing Desk & Checkout';
+      case 'drafts': return 'Draft Invoices';
       case 'invoices': return 'Invoices & Warranty Archive';
       case 'products': return 'Products & IMEIs Catalog Manager';
       case 'customers': return 'Customers CRM Database';

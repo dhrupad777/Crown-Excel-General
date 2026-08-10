@@ -14,6 +14,7 @@ import { Navbar } from './components/Navbar';
 import { Modal } from './components/Modal';
 import { AuthGate } from './components/AuthGate';
 import { BillingDesk } from './pages/BillingDesk';
+import { DraftsView } from './pages/DraftsView';
 import { InvoicesArchive } from './pages/InvoicesArchive';
 import { ProductsManager } from './pages/ProductsManager';
 import { CustomersManager } from './pages/CustomersManager';
@@ -32,6 +33,13 @@ export function App() {
   const noTeam = !isAdmin && staff && !storageService.getCurrentTeamId();
   const [activeTab, setActiveTab] = useState('billing');
   const [selectedInvoiceId, setSelectedInvoiceId] = useState(null);
+  const [continueDraftId, setContinueDraftId] = useState(null);
+
+  // From the Drafts tab: open the Billing Desk in continue mode on this draft.
+  const handleContinueDraft = (id) => {
+    setContinueDraftId(id);
+    setActiveTab('billing');
+  };
 
   // Tracks whether the Billing Desk holds an unfinalized bill, so we can warn before navigating
   // away and discarding it. A ref (not state) — it only needs to be read at navigation time.
@@ -175,6 +183,8 @@ export function App() {
           }
           setActiveTab(tab);
           if (tab !== 'invoices') setSelectedInvoiceId(null);
+          // Clear the draft deep-link once we've navigated (so returning to Billing later starts fresh).
+          if (tab !== 'billing') setContinueDraftId(null);
         }}
         onOpenSettings={() => setShowSettings(true)}
       />
@@ -189,7 +199,10 @@ export function App() {
           </div>
         )}
         {activeTab === 'billing' && (
-          <BillingDesk onViewInvoice={handleViewInvoice} onDirtyChange={handleBillDirty} />
+          <BillingDesk onViewInvoice={handleViewInvoice} onDirtyChange={handleBillDirty} continueDraftId={continueDraftId} />
+        )}
+        {activeTab === 'drafts' && (
+          <DraftsView onContinueDraft={handleContinueDraft} />
         )}
         {activeTab === 'invoices' && (
           <InvoicesArchive initialInvoiceId={selectedInvoiceId} />

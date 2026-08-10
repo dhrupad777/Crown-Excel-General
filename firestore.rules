@@ -156,18 +156,33 @@ service cloud.firestore {
       //      invoice" flow, where another store in the same region adds its own units. Identity and
       //      the original biller stay immutable, and items may only GROW (size can't shrink), so a
       //      standard user can never rewrite or trim a finalized sale — only extend it.
+      // A draft that has passed its 2-day window is frozen for standard staff — only an admin may
+      // then append/finalize/cancel it. `request.time` is the server clock, so the deadline can't
+      // be gamed from a device.
+      function draftExpiredForStaff() {
+        return 'draftExpiresAt' in resource.data
+          && resource.data.status == 'draft'
+          && request.time.toMillis() > resource.data.draftExpiresAt;
+      }
       allow update: if isAdmin()
         || (ownTeam()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['query'])
             && request.resource.data.query is map
             && textOk(request.resource.data.query.note, 5000))
+        // Append units and/or move a DRAFT toward FINAL — the multi-store "continue / draft" flow.
+        // Identity + original biller stay immutable, items may only GROW, and a standard user can
+        // only ever leave the status at 'draft' or set it to 'final' (never 'cancelled'). Blocked
+        // once the draft has expired (admins bypass above).
         || (ownTeam()
+            && !draftExpiredForStaff()
             && request.resource.data.teamId == resource.data.teamId
             && request.resource.data.invoiceNo == resource.data.invoiceNo
             && request.resource.data.billedBy == resource.data.billedBy
             && request.resource.data.items.size() >= resource.data.items.size()
+            && (!('status' in request.resource.data) || request.resource.data.status in ['draft', 'final'])
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['items', 'registrySummary', 'updatedAt', 'appendedBy', 'appendedByName']));
+                 .hasOnly(['items', 'status', 'draftExpiresAt', 'registrySummary', 'updatedAt',
+                           'appendedBy', 'appendedByName', 'finalizedBy', 'finalizedByName', 'finalizedAt']));
     }
 
     // Shared sequence counters — legacy/unused (numbers are operator-entered per team now).

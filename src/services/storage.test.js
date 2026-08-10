@@ -36,6 +36,72 @@ beforeEach(() => {
   storageService.setCurrentUser(null);
 });
 
+describe('draft invoice lifecycle', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'staff@b.com', role: 'standard', locationId: 'loc-1' });
+  });
+
+  const makeDraft = (over = {}) => storageService.saveInvoice({
+    id: 'Dubai__D1', invoiceNo: 'D1', teamId: 'Dubai', customer: { company: 'ACME' },
+    items: [{ name: 'W', imei: 'SND1', locationId: 'loc-1', locationName: 'HO' }],
+    status: 'draft', draftExpiresAt: storageService.draftExpiry(), ...over
+  });
+
+  it('separates drafts from final invoices', () => {
+    makeDraft();
+    expect(storageService.getDrafts()).toHaveLength(1);
+    expect(storageService.getFinalInvoices()).toHaveLength(0);
+    expect(storageService.getDashboardStats().draftsCount).toBe(1);
+    expect(storageService.getDashboardStats().invoicesCount).toBe(0); // drafts excluded from the archive count
+  });
+
+  it('isDraftExpired only past the window', () => {
+    expect(storageService.isDraftExpired({ status: 'draft', draftExpiresAt: Date.now() + 1000 })).toBe(false);
+    expect(storageService.isDraftExpired({ status: 'draft', draftExpiresAt: Date.now() - 1000 })).toBe(true);
+    expect(storageService.isDraftExpired({ status: 'final', draftExpiresAt: Date.now() - 1000 })).toBe(false);
+  });
+
+  it('finalizeDraft flips status to final and registers serials', async () => {
+    makeDraft();
+    await storageService.finalizeDraft('Dubai__D1');
+    expect(storageService.getInvoiceById('Dubai__D1').status).toBe('final');
+    expect(storageService.getDrafts()).toHaveLength(0);
+    expect(storageService.getFinalInvoices()).toHaveLength(1);
+    expect(firebaseService.createIfAbsent).toHaveBeenCalled(); // serials registered on finalize
+  });
+
+  it('a standard user cannot finalize an EXPIRED draft', async () => {
+    makeDraft({ draftExpiresAt: Date.now() - 1000 });
+    await expect(storageService.finalizeDraft('Dubai__D1')).rejects.toThrow(/administrator/i);
+  });
+
+  it('an admin CAN finalize an expired draft', async () => {
+    makeDraft({ draftExpiresAt: Date.now() - 1000 });
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+    await storageService.finalizeDraft('Dubai__D1');
+    expect(storageService.getInvoiceById('Dubai__D1').status).toBe('final');
+  });
+
+  it('cancelDraft is admin-only and voids (keeps a recoverable record)', async () => {
+    makeDraft();
+    await expect(storageService.cancelDraft('Dubai__D1')).rejects.toThrow(/administrator/i);
+
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+    await storageService.cancelDraft('Dubai__D1', 'test');
+    expect(storageService.getDrafts()).toHaveLength(0);           // gone from active views
+    const raw = JSON.parse(localStorage.getItem('crown_excel_invoices_v2'));
+    const rec = raw.find((r) => r.id === 'Dubai__D1');
+    expect(rec.deleted).toBe(true);                                // but still on record
+    expect(rec.status).toBe('cancelled');
+  });
+
+  it('a draft does NOT register serials until finalized', () => {
+    makeDraft();
+    expect(firebaseService.createIfAbsent).not.toHaveBeenCalled();
+  });
+});
+
 describe('_newId — the bulk-import ID collision', () => {
   // The original `prefix-${Date.now()}` handed every record created inside one millisecond the
   // SAME id; each cloud write then overwrote the previous one and a 65-row import landed as 25.

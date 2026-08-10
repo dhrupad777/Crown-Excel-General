@@ -166,9 +166,9 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showCalendarPopover]);
 
-  // Load Invoices
+  // Load Invoices — finalized bills only; open drafts live in the Drafts tab.
   const loadInvoices = () => {
-    const data = storageService.getInvoices();
+    const data = storageService.getFinalInvoices();
     setInvoices(data);
   };
 

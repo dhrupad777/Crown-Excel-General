@@ -25,6 +25,7 @@ const STORAGE_KEYS = {
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const BACKUP_MAX = 12; // keep a rolling ~3 months of weekly snapshots on-device
+const DRAFT_WINDOW_MS = 2 * 24 * 60 * 60 * 1000; // a draft invoice stays open for max 2 days
 
 const INVOICE_NUMBER_START = 10000;
 
@@ -639,6 +640,29 @@ class StorageService {
     return invoices.find(inv => inv.id === id) || null;
   }
 
+  // --- DRAFTS ---
+  // A draft is an open bill (status 'draft') that stores in a region append serials to over up to
+  // 2 days, then save as final. Absent status = 'final' so every legacy invoice is unaffected.
+  // Cancelled drafts are soft-deleted (deleted:true), so getInvoices already hides them.
+  getDrafts() {
+    return this.getInvoices().filter((i) => i.status === 'draft');
+  }
+
+  getFinalInvoices() {
+    return this.getInvoices().filter((i) => i.status !== 'draft');
+  }
+
+  isDraftExpired(inv) {
+    return inv?.status === 'draft'
+      && typeof inv.draftExpiresAt === 'number'
+      && Date.now() > inv.draftExpiresAt;
+  }
+
+  // Expiry timestamp for a brand-new draft (creation + the 2-day window).
+  draftExpiry() {
+    return Date.now() + DRAFT_WINDOW_MS;
+  }
+
   // True if a bill in the given team already carries this number. Numbers are per-team now (Dubai's
   // "INV-1" is independent of Nigeria's), so the scan is scoped to `teamId`. Matches the human
   // `invoiceNo` (falling back to the raw id for legacy bills), case-insensitively, and reads the RAW
@@ -878,6 +902,52 @@ class StorageService {
   // carry a stated reason. Nothing is ever destroyed here — see purgeExpiredDeletions.
   deleteInvoice(id, reason = '') {
     return this._archive(STORAGE_KEYS.INVOICES, 'invoices', id, reason);
+  }
+
+  // Turns a draft into a real invoice: status → 'final', then register its serials (background,
+  // idempotent — see registerSerialsFromInvoice). Allowed for the region's staff within the 2-day
+  // window; once expired ONLY an admin may finalize (also enforced by firestore.rules).
+  async finalizeDraft(id) {
+    const inv = this.getInvoiceById(id);
+    if (!inv) throw new Error('Draft not found.');
+    if (inv.status !== 'draft') return inv; // already final — nothing to do
+    if (this.isDraftExpired(inv) && !this._isAdmin()) {
+      throw new Error('This draft has passed its 2-day window — only an administrator can finalize it now.');
+    }
+    const me = this._currentUser || {};
+    const finalInv = { ...inv, status: 'final', finalizedBy: me.email || '', finalizedByName: me.displayName || '', finalizedAt: new Date().toISOString() };
+    const saved = await this.saveInvoice(finalInv, { confirm: true });
+    this.appendAudit('invoice.finalize', inv, saved, { entity: 'invoice', entityId: id });
+    // Register in the background — the finalize itself is already confirmed to the cloud.
+    this.registerSerialsFromInvoice(saved).catch((e) => console.warn('Draft finalize registration:', e.message));
+    return saved;
+  }
+
+  // Admin-only cancel of a draft: void it (keep a recoverable record — same soft-delete path as a
+  // voided invoice) and mark it 'cancelled'. Serials were never registered, so nothing to undo.
+  async cancelDraft(id, reason = '') {
+    if (!this._isAdmin()) throw new Error('Only an administrator can cancel a draft.');
+    const all = this._readRaw(STORAGE_KEYS.INVOICES);
+    const before = all.find((r) => r.id === id);
+    if (!before) throw new Error('Draft not found.');
+    const me = this._currentUser || {};
+    const cancelled = {
+      ...before,
+      status: 'cancelled',
+      deleted: true,
+      cancelledBy: me.email || '',
+      cancelledByName: me.displayName || '',
+      cancelledAt: new Date().toISOString(),
+      deletedBy: me.email || '',
+      deletedByName: me.displayName || '',
+      deletedAt: new Date().toISOString(),
+      deleteReason: String(reason || '').trim() || 'Draft cancelled'
+    };
+    if (!this._setItem(STORAGE_KEYS.INVOICES, all.map((r) => (r.id === id ? cancelled : r)))) return null;
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+    await firebaseService.saveToCloudStrict('invoices', id, cancelled);
+    this.appendAudit('invoice.cancel', before, cancelled, { entity: 'invoice', entityId: id });
+    return cancelled;
   }
 
   // Every bill this browser knows about, voided ones included. Exports use this so a voided
@@ -1485,14 +1555,18 @@ class StorageService {
 
     const totalItemsSold = invoices.reduce((sum, inv) => sum + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
     const openQueries = invoices.filter((inv) => inv.query && !inv.query.resolved).length;
+    const drafts = invoices.filter((inv) => inv.status === 'draft');
+    const expiredDrafts = drafts.filter((inv) => this.isDraftExpired(inv)).length;
 
     return {
-      invoicesCount: invoices.length,
+      invoicesCount: invoices.filter((inv) => inv.status !== 'draft').length,
       productsCount: products.length,
       customersCount: customers.length,
       serialsCount: serials.length,
       totalItemsSold,
-      openQueries
+      openQueries,
+      draftsCount: drafts.length,
+      expiredDrafts
     };
   }
 
