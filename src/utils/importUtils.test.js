@@ -12,7 +12,7 @@ vi.mock('../services/storage', () => ({
 }));
 
 const { storageService } = await import('../services/storage');
-const { importCustomers, importProducts, columnValueCounts, planSerialImport } = await import('./importUtils');
+const { importCustomers, importProducts, columnValueCounts, planSerialImport, PROBLEM_KINDS, isResolvable, isWarning } = await import('./importUtils');
 
 beforeEach(() => { vi.clearAllMocks(); });
 
@@ -201,5 +201,118 @@ describe('planSerialImport', () => {
     const res = plan([row('', ''), row('NH.QTREM.003', 'OK1')]);
     expect(res.ready).toHaveLength(1);
     expect(res.problems).toHaveLength(0);
+  });
+});
+
+// The import must never dead-end on a guess. Every problem is either something the operator can
+// resolve in the modal, a heuristic they can wave through, or a correct skip — and the classifier
+// says which. These tests exist because an over-eager heuristic once blocked 24 valid serials.
+describe('planSerialImport recovery', () => {
+  const PRODUCTS = [
+    { id: 'p1', name: 'Acer Nitro ANV16-71', barcode: 'NH.QTREM.003', sku: '' },
+    { id: 'p2', name: 'Acer TravelMate P215-55', barcode: 'NX.BSREM.002', sku: '' }
+  ];
+  const plan = (rows, over = {}) => planSerialImport({
+    rows, codeColumn: 'SKU', serialColumn: 'SERIAL NUMBER', products: PRODUCTS, ...over
+  });
+  const row = (code, serial) => ({ SKU: code, 'SERIAL NUMBER': serial });
+
+  // Serial shapes seen in this business's real catalog and supplier sheets. NONE may ever be
+  // flagged — this corpus is the guard against another false-positive lockout.
+  const REAL_SERIALS = [
+    'NHQVUEM002538262E97600', 'NHQX5EM003536228E07600', 'NHQVUEM0025232CD6E7600',
+    '5CD54894PY', '5CD548956G', 'D15E5EA#ABV', 'C02G9012MD6R',
+    '358923009182391',           // 15-digit IMEI
+    '1122334490', '0012345', 'SN-2024/00123', 'ABC 123 XYZ',
+    'TCN0CV01F85349D', '21SJ002AGP', 'NX.DGCEM.001', 'E5E5E5E5E5'
+  ];
+
+  it('never flags any real-world serial shape', () => {
+    const res = plan(REAL_SERIALS.map((s) => row('NH.QTREM.003', s)));
+    expect(res.problems).toEqual([]);
+    expect(res.ready).toHaveLength(REAL_SERIALS.length);
+  });
+
+  it('classifies an unmatched code as resolvable, not terminal', () => {
+    const res = plan([row('NX.BSREM.00C', 'SER1')]);
+    expect(res.problems[0].kind).toBe(PROBLEM_KINDS.UNMATCHED_PRODUCT);
+    expect(isResolvable(res.problems[0].kind)).toBe(true);
+  });
+
+  it('applies a codeOverride so the operator can point a code at a product', () => {
+    const rows = [row('NX.BSREM.00C', 'SER1'), row('NX.BSREM.00C', 'SER2')];
+    expect(plan(rows).ready).toHaveLength(0);
+
+    const res = plan(rows, { codeOverrides: { 'NX.BSREM.00C': PRODUCTS[1] } });
+    expect(res.problems).toHaveLength(0);
+    expect(res.ready).toHaveLength(2);
+    expect(res.ready.every((r) => r.product.id === 'p2')).toBe(true);
+  });
+
+  it('re-runs the duplicate checks on rows an override just made eligible', () => {
+    // Both rows carry the same serial. Before the override they fail on the unknown code and the
+    // duplicate is never seen; after it, exactly one must survive.
+    const rows = [row('NX.BSREM.00C', 'SAME1'), row('NX.BSREM.00C', 'same1')];
+    const res = plan(rows, { codeOverrides: { 'NX.BSREM.00C': PRODUCTS[1] } });
+    expect(res.ready).toHaveLength(1);
+    expect(res.problems[0].kind).toBe(PROBLEM_KINDS.DUPLICATE_IN_FILE);
+  });
+
+  it('honours a "skip" override without reporting those rows as problems', () => {
+    const res = plan([row('NX.BSREM.00C', 'SER1')], { codeOverrides: { 'NX.BSREM.00C': 'skip' } });
+    expect(res.ready).toHaveLength(0);
+    expect(res.problems).toHaveLength(0);
+    expect(res.skippedByOperator).toHaveLength(1);
+  });
+
+  it('lets an override settle an ambiguous code', () => {
+    const products = [
+      { id: 'a', name: 'Lenovo A', barcode: '21SJ002AGP', sku: '' },
+      { id: 'b', name: 'Lenovo B', barcode: 'D494A99BA41A', sku: '21SJ002AGP' }
+    ];
+    const rows = [row('21SJ002AGP', 'SER1')];
+    const before = plan(rows, { products });
+    expect(before.problems[0].kind).toBe(PROBLEM_KINDS.AMBIGUOUS_PRODUCT);
+    expect(before.problems[0].matches).toHaveLength(2);
+
+    const after = plan(rows, { products, codeOverrides: { '21SJ002AGP': products[1] } });
+    expect(after.ready[0].product.id).toBe('b');
+  });
+
+  it('classifies heuristic serial complaints as WARNINGS that acceptWarnings clears', () => {
+    const rows = [row('NH.QTREM.003', '1.23457e+21'), row('NH.QTREM.003', 'AB')];
+    const strict = plan(rows);
+    expect(strict.problems.map((p) => p.kind))
+      .toEqual([PROBLEM_KINDS.SUSPECT_SERIAL, PROBLEM_KINDS.SHORT_SERIAL]);
+    expect(strict.problems.every((p) => isWarning(p.kind))).toBe(true);
+
+    const waved = plan(rows, { acceptWarnings: true });
+    expect(waved.problems).toHaveLength(0);
+    expect(waved.ready.map((r) => r.raw)).toEqual(['1.23457e+21', 'AB']);
+  });
+
+  // Skips stay skips even with acceptWarnings on — these are facts, not guesses.
+  it('acceptWarnings never overrides a real duplicate or an on-bill serial', () => {
+    const rows = [row('NH.QTREM.003', 'DUP'), row('NH.QTREM.003', 'DUP'), row('NH.QTREM.003', 'ONBILL')];
+    const res = plan(rows, { acceptWarnings: true, existingSerials: ['ONBILL'] });
+    expect(res.ready).toHaveLength(1);
+    expect(res.problems.map((p) => p.kind).sort())
+      .toEqual([PROBLEM_KINDS.DUPLICATE_IN_FILE, PROBLEM_KINDS.ON_BILL].sort());
+    expect(res.problems.every((p) => !isWarning(p.kind) && !isResolvable(p.kind))).toBe(true);
+  });
+
+  it('every problem it emits is classified into a known kind', () => {
+    const res = plan([
+      row('', ''), row('NH.QTREM.003', ''), row('', 'SER1'), row('NOPE', 'SER2'),
+      row('NH.QTREM.003', 'AB'), row('NH.QTREM.003', '1e+21'),
+      row('NH.QTREM.003', 'DUP'), row('NH.QTREM.003', 'DUP')
+    ]);
+    const known = new Set(Object.values(PROBLEM_KINDS));
+    expect(res.problems.length).toBeGreaterThan(0);
+    for (const p of res.problems) {
+      expect(known.has(p.kind)).toBe(true);
+      expect(typeof p.reason).toBe('string');
+      expect(p.reason.length).toBeGreaterThan(0);
+    }
   });
 });

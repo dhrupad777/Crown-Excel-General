@@ -1,5 +1,8 @@
-import React, { useState, useRef } from 'react';
-import { FileSpreadsheet, Upload, Download, CheckCircle2, AlertTriangle, Loader2, PackagePlus } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import {
+  FileSpreadsheet, Upload, Download, CheckCircle2, AlertTriangle, Loader2,
+  PackagePlus, Wrench, Ban, SkipForward, Plus
+} from 'lucide-react';
 import { Modal } from './Modal';
 import {
   parseWorkbookFile,
@@ -7,12 +10,18 @@ import {
   pickField,
   planSerialImport,
   buildSerialProblemRows,
+  normalizeProductCode,
+  isResolvable,
+  isWarning,
+  PROBLEM_KINDS,
+  VALID_CATEGORIES,
   PRODUCT_CODE_ALIASES,
   SERIAL_ALIASES,
   SERIAL_IMPORT_TEMPLATE_HEADERS
 } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, formatLocalDate } from '../utils/exportUtils';
 import { storageService } from '../services/storage';
+import { guessProductDefaults } from '../utils/productDefaults';
 
 // Bulk-adds units to the bill from a supplier sheet of "product code + serial number" — the
 // spreadsheet equivalent of gun-scanning each unit. One file can span several products; each row
@@ -20,6 +29,11 @@ import { storageService } from '../services/storage';
 //
 // It only ADDS BILL ROWS. Serials reach the warranty registry the usual way, when the bill is
 // finalized, so there's still exactly one registration path.
+//
+// DESIGN RULE: nothing we merely *suspect* may dead-end the import. A code we can't resolve gets a
+// product picker or an inline "create product"; a serial we think Excel mangled is a warning the
+// operator can wave through. The ONLY terminal failures are facts — a serial already registered or
+// already sold — because letting those through would break the anti-resale guarantee.
 //
 // `onAdd(entries)` receives [{ product, serial }] — the Billing Desk builds the item rows so the
 // store tagging lives in one place.
@@ -29,10 +43,33 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
   const [columns, setColumns] = useState([]);
   const [codeColumn, setCodeColumn] = useState('');
   const [serialColumn, setSerialColumn] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [report, setReport] = useState(null);
   const [parseError, setParseError] = useState('');
+  const [reviewing, setReviewing] = useState(false);
+
+  // Operator resolutions: NORMALIZED code → product | 'skip'
+  const [codeOverrides, setCodeOverrides] = useState({});
+  const [acceptWarnings, setAcceptWarnings] = useState(false);
+  // Inline "create product" form, keyed by the code being created for.
+  const [creatingFor, setCreatingFor] = useState('');
+  const [createForm, setCreateForm] = useState({ name: '', category: 'Laptops' });
+  const [createBusy, setCreateBusy] = useState(false);
+
+  // Registry / past-sale verdict per normalized serial: string reason = blocked, null = clean.
+  const [serialChecks, setSerialChecks] = useState(() => new Map());
+  const [checking, setChecking] = useState(false);
+  const checkingRef = useRef(false);
+
+  const [products, setProducts] = useState([]);
   const fileInputRef = useRef(null);
+
+  const refreshProducts = useCallback(() => setProducts(storageService.getProducts()), []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    refreshProducts();
+    window.addEventListener('crown-data-change', refreshProducts);
+    return () => window.removeEventListener('crown-data-change', refreshProducts);
+  }, [isOpen, refreshProducts]);
 
   const reset = () => {
     setRows(null);
@@ -40,9 +77,15 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     setColumns([]);
     setCodeColumn('');
     setSerialColumn('');
-    setReport(null);
     setParseError('');
-    setBusy(false);
+    setReviewing(false);
+    setCodeOverrides({});
+    setAcceptWarnings(false);
+    setCreatingFor('');
+    setCreateBusy(false);
+    setSerialChecks(new Map());
+    checkingRef.current = false;
+    setChecking(false);
   };
 
   const handleClose = () => { reset(); onClose(); };
@@ -64,7 +107,10 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     const file = e.target.files?.[0];
     if (!file) return;
     setParseError('');
-    setReport(null);
+    setReviewing(false);
+    setCodeOverrides({});
+    setAcceptWarnings(false);
+    setSerialChecks(new Map());
     try {
       const parsed = await parseWorkbookFile(file);
       if (!parsed.length) {
@@ -108,70 +154,170 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     }
   };
 
-  // Two passes: the sync pre-flight (product match, blanks, in-file and on-bill duplicates), then
-  // the two network-backed guards the scanner also applies — the registry (checkSerials reads the
-  // cloud too, so a unit registered by ANOTHER region is still caught) and past invoices.
-  const handleCheck = async () => {
-    if (!rows || !codeColumn || !serialColumn) return;
-    setBusy(true);
+  // Recomputed from scratch on every resolution rather than patched in place: a row that failed on
+  // an unmatched code never reached the duplicate checks, so those have to be re-evaluated once the
+  // operator makes it eligible.
+  // The parent rebuilds this array on every render, so key the memo on its CONTENT — otherwise the
+  // plan (and the check effect below that depends on it) churns on every keystroke in the Billing Desk.
+  const existingKey = existingSerials.join('|');
+  const billSerials = useMemo(() => (existingKey ? existingKey.split('|') : []), [existingKey]);
 
-    const products = storageService.getProducts();
-    const plan = planSerialImport({ rows, codeColumn, serialColumn, products, existingSerials });
-    const problems = [...plan.problems];
-    const ready = [];
+  const plan = useMemo(() => {
+    if (!rows || !codeColumn || !serialColumn) return { ready: [], problems: [], skippedByOperator: [] };
+    return planSerialImport({
+      rows, codeColumn, serialColumn, products, existingSerials: billSerials, codeOverrides, acceptWarnings
+    });
+  }, [rows, codeColumn, serialColumn, products, billSerials, codeOverrides, acceptWarnings]);
 
-    let registryReport = { rows: [] };
-    if (plan.ready.length > 0) {
-      registryReport = await storageService.checkSerials(plan.ready.map((r) => r.serial));
-    }
-    const registered = new Map(
-      (registryReport.rows || []).filter((r) => r.registered).map((r) => [r.serial, r.record])
-    );
+  const unchecked = useMemo(
+    () => plan.ready.filter((e) => !serialChecks.has(e.serial)),
+    [plan.ready, serialChecks]
+  );
+  const readyNow = useMemo(
+    () => plan.ready.filter((e) => serialChecks.get(e.serial) === null),
+    [plan.ready, serialChecks]
+  );
+  const blocked = useMemo(
+    () => plan.ready.filter((e) => typeof serialChecks.get(e.serial) === 'string')
+      .map((e) => ({ ...e, reason: serialChecks.get(e.serial) })),
+    [plan.ready, serialChecks]
+  );
 
-    for (const entry of plan.ready) {
-      const hit = registered.get(entry.serial);
-      if (hit) {
-        const when = hit.date ? ` on ${new Date(hit.date).toLocaleDateString()}` : '';
-        const inv = hit.invoiceNo ? `, invoice ${hit.invoiceNo}` : '';
-        problems.push({ ...entry, reason: `Serial ${entry.serial} is already registered${when}${inv} — it cannot be sold again` });
-        continue;
+  // Registry + past-sale lookup for whatever became newly eligible. checkSerials reads the cloud as
+  // well as the local mirror, so a unit registered by ANOTHER region is still caught.
+  useEffect(() => {
+    if (!reviewing || unchecked.length === 0 || checkingRef.current) return;
+    checkingRef.current = true;
+    setChecking(true);
+    const batch = unchecked;
+    // Deliberately not cancellable: the merge below only ADDS keys and is idempotent, so letting a
+    // late result land is harmless — and re-running the same query on every parent re-render is not.
+    // Anything the operator resolves mid-flight is picked up on the next pass, because merging
+    // changes `serialChecks` and re-triggers this effect with the newly eligible rows.
+    (async () => {
+      let registered = new Map();
+      try {
+        const report = await storageService.checkSerials(batch.map((e) => e.serial));
+        registered = new Map((report.rows || []).filter((r) => r.registered).map((r) => [r.serial, r.record]));
+      } catch (err) {
+        console.warn('Serial import registry check failed:', err.message);
       }
-      const sold = storageService.findInvoiceBySerial(entry.serial);
-      if (sold.length > 0) {
-        problems.push({ ...entry, reason: `Serial ${entry.serial} was already sold on invoice ${sold[0].invoice.invoiceNo || sold[0].invoice.id}` });
-        continue;
-      }
-      ready.push(entry);
+      setSerialChecks((prev) => {
+        const next = new Map(prev);
+        for (const e of batch) {
+          const hit = registered.get(e.serial);
+          if (hit) {
+            const when = hit.date ? ` on ${new Date(hit.date).toLocaleDateString()}` : '';
+            const inv = hit.invoiceNo ? `, invoice ${hit.invoiceNo}` : '';
+            next.set(e.serial, `Already registered${when}${inv} — cannot be sold again`);
+            continue;
+          }
+          const sold = storageService.findInvoiceBySerial(e.serial);
+          next.set(e.serial, sold.length > 0
+            ? `Already sold on invoice ${sold[0].invoice.invoiceNo || sold[0].invoice.id}`
+            : null);
+        }
+        return next;
+      });
+      checkingRef.current = false;
+      setChecking(false);
+    })();
+  }, [reviewing, unchecked]);
+
+  // Resolvable problems, grouped by the code they share — the operator answers once per code, not
+  // once per row.
+  const resolveGroups = useMemo(() => {
+    const byCode = new Map();
+    for (const p of plan.problems) {
+      if (!isResolvable(p.kind)) continue;
+      const key = normalizeProductCode(p.code);
+      const g = byCode.get(key);
+      if (g) { g.count += 1; continue; }
+      byCode.set(key, { key, code: p.code, kind: p.kind, matches: p.matches || [], count: 1 });
     }
+    return [...byCode.values()].sort((a, b) => b.count - a.count);
+  }, [plan.problems]);
 
-    problems.sort((a, b) => a.rowNumber - b.rowNumber);
+  const warnings = useMemo(() => plan.problems.filter((p) => isWarning(p.kind)), [plan.problems]);
+  const skipped = useMemo(
+    () => plan.problems.filter((p) => !isResolvable(p.kind) && !isWarning(p.kind)),
+    [plan.problems]
+  );
 
-    // Units per product, for the confirmation summary.
-    const byProduct = [];
-    for (const entry of ready) {
-      const found = byProduct.find((g) => g.product.id === entry.product.id);
-      if (found) found.count += 1;
-      else byProduct.push({ product: entry.product, count: 1 });
+  const skippedByChoice = plan.skippedByOperator.length;
+  const needsAttention = resolveGroups.reduce((s, g) => s + g.count, 0);
+
+  const setOverride = (key, value) => setCodeOverrides((prev) => ({ ...prev, [key]: value }));
+  const clearOverride = (key) => setCodeOverrides((prev) => {
+    const next = { ...prev };
+    delete next[key];
+    return next;
+  });
+
+  const openCreate = (group) => {
+    setCreatingFor(group.key);
+    setCreateForm({ name: '', category: 'Laptops' });
+  };
+
+  // Awaited with confirm:true — a product that the cloud rejected must not silently become the
+  // answer for 50 rows.
+  const handleCreateProduct = async (group) => {
+    const name = createForm.name.trim();
+    if (!name) return;
+    setCreateBusy(true);
+    try {
+      const saved = await storageService.saveProduct({
+        name,
+        barcode: group.code.trim(),
+        sku: '',
+        category: createForm.category,
+        unit: 'Box'
+      }, { confirm: true });
+      if (!saved) throw new Error('Could not save locally (device storage may be full).');
+      refreshProducts();
+      setOverride(group.key, saved);
+      setCreatingFor('');
+    } catch (err) {
+      alert(`Could not create that product:\n\n${err.message}\n\nNothing was imported.`);
     }
-
-    setReport({ ready, problems, byProduct });
-    setBusy(false);
+    setCreateBusy(false);
   };
 
   const handleDownloadProblems = () => {
-    if (!report?.problems?.length) return;
+    const all = [
+      ...plan.problems,
+      ...blocked.map((b) => ({ rowNumber: b.rowNumber, code: b.code, raw: b.raw, reason: b.reason }))
+    ].sort((a, b) => a.rowNumber - b.rowNumber);
+    if (!all.length) return;
     exportToCsv({
       filename: `Serial_Import_Problems_${formatLocalDate(new Date())}.csv`,
       headers: ['Row #', 'Barcode / SKU', 'Serial', 'Problem'],
-      rows: buildSerialProblemRows(report.problems)
+      rows: buildSerialProblemRows(all)
     });
   };
 
   const handleConfirm = () => {
-    if (!report?.ready?.length) return;
-    onAdd(report.ready.map(({ product, serial }) => ({ product, serial })));
+    if (readyNow.length === 0) return;
+    onAdd(readyNow.map(({ product, serial }) => ({ product, serial })));
     handleClose();
   };
+
+  const byProduct = useMemo(() => {
+    const groups = [];
+    for (const entry of readyNow) {
+      const found = groups.find((g) => g.product.id === entry.product.id);
+      if (found) found.count += 1;
+      else groups.push({ product: entry.product, count: 1 });
+    }
+    return groups.sort((a, b) => b.count - a.count);
+  }, [readyNow]);
+
+  const sortedProducts = useMemo(
+    () => [...products].sort((a, b) => String(a.name).localeCompare(String(b.name))),
+    [products]
+  );
+
+  const problemCount = plan.problems.length + blocked.length;
 
   return (
     <Modal
@@ -210,7 +356,7 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
         )}
 
         {/* Step 2: column mapping + preview */}
-        {rows && !report && (
+        {rows && !reviewing && (
           <>
             <div className="bg-slate-50 border-2 border-slate-200 rounded-xl p-4 space-y-3">
               <div className="flex items-center justify-between text-xs font-bold text-slate-700">
@@ -255,7 +401,7 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
 
               <p className="text-[10px] font-semibold text-slate-500">
                 The product column is matched against each device's <b>barcode</b> and its <b>model / SKU</b>, so
-                either works. Nothing is added until you review the check below.
+                either works. Nothing is added until you review the check on the next screen.
               </p>
 
               {codeColumn && serialColumn && (
@@ -280,45 +426,168 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
               )}
             </div>
 
-            <div className="bg-amber-50 border-2 border-amber-200 rounded-xl p-3 flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <p className="text-[11px] font-semibold text-amber-800">
-                The serial column in our <b>Blank Template</b> is already set to <b>Text</b>, so serials you type
-                keep their leading zeros. If you paste serials in from another sheet, use
-                <b> Paste Special → Values</b> — a plain paste carries the other sheet's formatting and Excel will
-                turn all-digit serials back into numbers.
-              </p>
-            </div>
-
             <button
               type="button"
-              onClick={handleCheck}
-              disabled={busy || !codeColumn || !serialColumn}
+              onClick={() => setReviewing(true)}
+              disabled={!codeColumn || !serialColumn}
               className="btn btn-primary w-full py-3 text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-60"
             >
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-              {busy ? 'Checking against the catalog & registry…' : `Check ${rows.length} Rows`}
+              <CheckCircle2 className="w-4 h-4" /> Check {rows.length} Rows
             </button>
           </>
         )}
 
-        {/* Step 3: results + confirm */}
-        {report && (
+        {/* Step 3: review, resolve, confirm */}
+        {rows && reviewing && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3 text-center">
               <div className="rounded-xl border-2 p-3 text-emerald-600 border-emerald-200 bg-emerald-50">
-                <div className="font-heading font-black text-2xl font-mono">{report.ready.length}</div>
+                <div className="font-heading font-black text-2xl font-mono flex items-center justify-center gap-2">
+                  {readyNow.length}
+                  {checking && <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />}
+                </div>
                 <div className="text-[10px] font-black uppercase tracking-wider">Ready to add</div>
               </div>
-              <div className={`rounded-xl border-2 p-3 ${report.problems.length ? 'text-red-600 border-red-200 bg-red-50' : 'text-slate-600 border-slate-200 bg-slate-50'}`}>
-                <div className="font-heading font-black text-2xl font-mono">{report.problems.length}</div>
-                <div className="text-[10px] font-black uppercase tracking-wider">Problems</div>
+              <div className={`rounded-xl border-2 p-3 ${problemCount ? 'text-amber-600 border-amber-200 bg-amber-50' : 'text-slate-600 border-slate-200 bg-slate-50'}`}>
+                <div className="font-heading font-black text-2xl font-mono">{problemCount}</div>
+                <div className="text-[10px] font-black uppercase tracking-wider">
+                  {needsAttention > 0 ? 'Need your input' : 'Problems'}
+                </div>
               </div>
             </div>
 
-            {report.byProduct.length > 0 && (
+            {/* --- RESOLVABLE: pick a product, create one, or skip --- */}
+            {resolveGroups.length > 0 && (
+              <div className="border-2 border-amber-300 rounded-xl bg-amber-50/40 overflow-hidden">
+                <div className="px-4 py-2.5 bg-amber-100/70 border-b-2 border-amber-200 flex items-center gap-2">
+                  <Wrench className="w-4 h-4 text-amber-700" />
+                  <span className="text-xs font-black text-amber-800 uppercase tracking-wider">
+                    Needs your input — {resolveGroups.length} code{resolveGroups.length === 1 ? '' : 's'}, {needsAttention} rows
+                  </span>
+                </div>
+                <div className="divide-y divide-amber-200/70">
+                  {resolveGroups.map((g) => (
+                    <div key={g.key} className="p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                          <span className="font-mono font-black text-sm text-slate-900">{g.code}</span>
+                          <span className="text-[11px] font-bold text-slate-500 ml-2">{g.count} row{g.count === 1 ? '' : 's'}</span>
+                        </div>
+                        <span className="text-[10px] font-black uppercase tracking-wider text-amber-700">
+                          {g.kind === PROBLEM_KINDS.AMBIGUOUS_PRODUCT ? 'Matches more than one product' : 'Not in the catalog'}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <select
+                          value={codeOverrides[g.key]?.id || ''}
+                          onChange={(e) => {
+                            const p = products.find((x) => x.id === e.target.value);
+                            if (p) setOverride(g.key, p); else clearOverride(g.key);
+                            setCreatingFor('');
+                          }}
+                          className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2 text-xs flex-1 min-w-0"
+                        >
+                          <option value="">Use an existing product…</option>
+                          {(g.kind === PROBLEM_KINDS.AMBIGUOUS_PRODUCT ? g.matches : sortedProducts).map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        {g.kind !== PROBLEM_KINDS.AMBIGUOUS_PRODUCT && (
+                          <button
+                            type="button"
+                            onClick={() => (creatingFor === g.key ? setCreatingFor('') : openCreate(g))}
+                            className="btn btn-outline py-2 px-3 text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap"
+                          >
+                            <Plus className="w-3.5 h-3.5" /> New product
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => (codeOverrides[g.key] === 'skip' ? clearOverride(g.key) : setOverride(g.key, 'skip'))}
+                          className={`btn py-2 px-3 text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                            codeOverrides[g.key] === 'skip' ? 'btn-primary' : 'btn-outline'
+                          }`}
+                        >
+                          <SkipForward className="w-3.5 h-3.5" /> Skip
+                        </button>
+                      </div>
+
+                      {creatingFor === g.key && (
+                        <div className="bg-white border-2 border-slate-200 rounded-xl p-3 space-y-2.5">
+                          <p className="text-[10px] font-bold text-slate-500">
+                            Creates a product with barcode <b className="font-mono text-[#2563eb]">{g.code}</b>, then
+                            uses it for all {g.count} row{g.count === 1 ? '' : 's'}.
+                          </p>
+                          <input
+                            type="text"
+                            value={createForm.name}
+                            onChange={(e) => {
+                              const name = e.target.value;
+                              const guess = guessProductDefaults(name);
+                              setCreateForm((prev) => ({
+                                ...prev,
+                                name,
+                                category: guess ? guess.category : prev.category
+                              }));
+                            }}
+                            placeholder="Product name — e.g. ACER TRAVELMATE P215-55, Core Ultra 7, 16GB, 512GB"
+                            className="input-field font-bold text-slate-900 bg-white border-slate-300 py-2 text-xs w-full"
+                          />
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <select
+                              value={createForm.category}
+                              onChange={(e) => setCreateForm((prev) => ({ ...prev, category: e.target.value }))}
+                              className="input-field font-bold text-slate-800 bg-white border-slate-300 py-2 text-xs flex-1"
+                            >
+                              {VALID_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => handleCreateProduct(g)}
+                              disabled={createBusy || !createForm.name.trim()}
+                              className="btn btn-primary py-2 px-4 text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-60 whitespace-nowrap"
+                            >
+                              {createBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PackagePlus className="w-3.5 h-3.5" />}
+                              Create &amp; use
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* --- WARNINGS: heuristics the operator can wave through --- */}
+            {warnings.length > 0 && (
+              <div className="border-2 border-orange-200 rounded-xl bg-orange-50/50 p-3.5 space-y-2">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-orange-600 flex-shrink-0" />
+                  <span className="text-xs font-black text-orange-800">
+                    {warnings.length} serial{warnings.length === 1 ? '' : 's'} look unusual
+                  </span>
+                </div>
+                <p className="text-[11px] font-semibold text-orange-800">
+                  {warnings[0].reason}
+                </p>
+                <label className="flex items-center gap-2 text-[11px] font-bold text-orange-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={acceptWarnings}
+                    onChange={(e) => setAcceptWarnings(e.target.checked)}
+                    className="accent-[#2563eb]"
+                  />
+                  Import them exactly as they appear in the sheet
+                </label>
+              </div>
+            )}
+
+            {/* --- READY, grouped by product --- */}
+            {byProduct.length > 0 && (
               <div className="border-2 border-slate-200 rounded-xl bg-white divide-y divide-slate-100">
-                {report.byProduct.map((g) => (
+                {byProduct.map((g) => (
                   <div key={g.product.id} className="p-3 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-xs font-black text-slate-900 truncate">{g.product.name}</div>
@@ -332,64 +601,86 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
               </div>
             )}
 
-            {report.problems.length > 0 && (
-              <>
-                <div className="overflow-x-auto border-2 border-red-200 rounded-xl bg-white max-h-64 overflow-y-auto">
+            {/* --- TERMINAL: already registered or sold. No override, by design. --- */}
+            {blocked.length > 0 && (
+              <div className="border-2 border-red-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-red-50 border-b-2 border-red-200 flex items-center gap-2">
+                  <Ban className="w-4 h-4 text-red-600" />
+                  <span className="text-xs font-black text-red-700 uppercase tracking-wider">
+                    {blocked.length} already sold or registered — cannot be added
+                  </span>
+                </div>
+                <div className="max-h-40 overflow-y-auto bg-white">
                   <table className="w-full text-[11px]">
-                    <thead className="bg-red-50 sticky top-0">
-                      <tr>
-                        {['Row', 'Barcode / SKU', 'Serial', 'Problem'].map((h) => (
-                          <th key={h} className="p-2 text-left font-black text-red-700 whitespace-nowrap">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {report.problems.slice(0, 200).map((p, i) => (
-                        <tr key={`${p.rowNumber}-${i}`}>
-                          <td className="p-2 font-mono font-bold text-slate-500">{p.rowNumber}</td>
-                          <td className="p-2 font-mono font-bold text-slate-800 whitespace-nowrap">{p.code || '—'}</td>
-                          <td className="p-2 font-mono font-semibold text-slate-700 whitespace-nowrap">{p.serial || '—'}</td>
-                          <td className="p-2 font-semibold text-red-600">{p.reason}</td>
+                      {blocked.slice(0, 100).map((b) => (
+                        <tr key={b.rowNumber}>
+                          <td className="p-2 font-mono font-bold text-slate-500 w-12">{b.rowNumber}</td>
+                          <td className="p-2 font-mono font-semibold text-slate-800 whitespace-nowrap">{b.serial}</td>
+                          <td className="p-2 font-semibold text-red-600">{b.reason}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {report.problems.length > 200 && (
-                  <p className="text-[11px] font-semibold text-slate-500">
-                    Showing the first 200 of {report.problems.length} — download the list for all of them.
-                  </p>
-                )}
-                <button
-                  type="button"
-                  onClick={handleDownloadProblems}
-                  className="btn btn-outline w-full py-2.5 text-xs font-bold text-red-600 border-red-300 hover:bg-red-50 flex items-center justify-center gap-2"
-                >
-                  <Download className="w-4 h-4" /> Download Problem Rows ({report.problems.length})
-                </button>
-              </>
+              </div>
             )}
 
-            {report.problems.length === 0 && (
+            {/* --- SKIPPED: blanks, duplicates, already on this bill --- */}
+            {(skipped.length > 0 || skippedByChoice > 0) && (
+              <details className="border-2 border-slate-200 rounded-xl bg-slate-50/60">
+                <summary className="px-4 py-2.5 text-xs font-black text-slate-600 cursor-pointer select-none">
+                  {skipped.length + skippedByChoice} row{skipped.length + skippedByChoice === 1 ? '' : 's'} skipped
+                  {skippedByChoice > 0 ? ` (${skippedByChoice} by your choice)` : ''} — blanks, duplicates, already on this bill
+                </summary>
+                <div className="max-h-40 overflow-y-auto bg-white border-t-2 border-slate-200">
+                  <table className="w-full text-[11px]">
+                    <tbody className="divide-y divide-slate-100">
+                      {skipped.slice(0, 100).map((p, i) => (
+                        <tr key={`${p.rowNumber}-${i}`}>
+                          <td className="p-2 font-mono font-bold text-slate-400 w-12">{p.rowNumber}</td>
+                          <td className="p-2 font-mono font-semibold text-slate-700 whitespace-nowrap">{p.raw || '—'}</td>
+                          <td className="p-2 font-semibold text-slate-500">{p.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+
+            {problemCount === 0 && (
               <p className="text-xs font-bold text-emerald-600 text-center flex items-center justify-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4" /> Every row checks out.
               </p>
             )}
 
+            {problemCount > 0 && (
+              <button
+                type="button"
+                onClick={handleDownloadProblems}
+                className="btn btn-outline w-full py-2.5 text-xs font-bold text-slate-600 flex items-center justify-center gap-2"
+              >
+                <Download className="w-4 h-4" /> Download Problem Rows ({problemCount})
+              </button>
+            )}
+
             <div className="flex flex-col sm:flex-row gap-3">
-              <button type="button" onClick={reset} className="btn btn-outline flex-1 py-2.5 text-xs font-bold">
-                Choose Another File
+              <button type="button" onClick={() => setReviewing(false)} className="btn btn-outline flex-1 py-2.5 text-xs font-bold">
+                Back to Columns
               </button>
               <button
                 type="button"
                 onClick={handleConfirm}
-                disabled={report.ready.length === 0}
+                disabled={readyNow.length === 0 || checking}
                 className="btn btn-primary flex-[2] py-2.5 text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-60"
               >
                 <PackagePlus className="w-4 h-4" />
-                {report.ready.length === 0
-                  ? 'Nothing to add'
-                  : `Add ${report.ready.length} Unit${report.ready.length === 1 ? '' : 's'} to Bill`}
+                {checking
+                  ? 'Checking…'
+                  : readyNow.length === 0
+                    ? 'Nothing to add yet'
+                    : `Add ${readyNow.length} Unit${readyNow.length === 1 ? '' : 's'} to Bill`}
               </button>
             </div>
           </div>

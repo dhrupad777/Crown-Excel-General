@@ -151,7 +151,7 @@ const resolveRegion = (row, defaultTeamId, validTeams) => {
 export const PRODUCT_TEMPLATE_HEADERS = ['Barcode', 'Device Name', 'Model / SKU', 'Category', 'Unit Type', 'Region'];
 export const CUSTOMER_TEMPLATE_HEADERS = ['Company', 'Customer Name', 'WhatsApp / Phone', 'Email', 'Region'];
 
-const VALID_CATEGORIES = ['Laptops', 'Mobile Phones', 'Tablets', 'Audio & Wearables', 'Accessories', 'Gaming', 'Peripherals', 'General'];
+export const VALID_CATEGORIES = ['Laptops', 'Mobile Phones', 'Tablets', 'Audio & Wearables', 'Accessories', 'Gaming', 'Peripherals', 'General'];
 
 // onDuplicate: 'update' overwrites the matched record's fields, 'skip' leaves it untouched.
 // Duplicate key for products = barcode (against the catalog AND within the file itself).
@@ -322,7 +322,10 @@ export const SERIAL_IMPORT_TEMPLATE_HEADERS = ['Barcode / SKU', 'Serial Number']
 export const PRODUCT_CODE_ALIASES = ['barcode', 'sku', 'modelsku', 'modelnumber', 'partnumber', 'itemcode', 'productcode'];
 export const SERIAL_ALIASES = ['serialnumber', 'serial', 'serialno', 'imei'];
 
-const normalizeCode = (s) => String(s ?? '').trim().toUpperCase();
+// Exported because `codeOverrides` is keyed by it — the caller MUST normalize the same way or an
+// operator's resolution silently fails to apply.
+export const normalizeProductCode = (s) => String(s ?? '').trim().toUpperCase();
+const normalizeCode = normalizeProductCode;
 
 // Product lookup keyed by BOTH barcode and sku. A code that resolves to more than one distinct
 // product is left ambiguous on purpose — one product's barcode really can be another's sku, and
@@ -357,13 +360,57 @@ const buildCodeIndex = (products) => {
 // parseWorkbookFile discards; the import template's Text column formatting mitigates it instead.
 const isScientificNotation = (s) => /^[+-]?\d+(?:\.\d+)?[eE][+-]\d+$/.test(s);
 
+// Every way a row can fail, split by what the OPERATOR can do about it. This split is the whole
+// point: a heuristic must never dead-end an import. Anything we merely *suspect* is a WARNING the
+// operator can wave through, anything we can repair is RESOLVABLE in the modal, and only facts we
+// are certain of are terminal. (An over-eager suspicion once blocked 24 valid serials with no way
+// past it — that must stay impossible by construction, not by the check being right.)
+export const PROBLEM_KINDS = {
+  // Resolvable — the modal offers a product picker / "create product" per code.
+  UNMATCHED_PRODUCT: 'unmatched-product',
+  AMBIGUOUS_PRODUCT: 'ambiguous-product',
+  // Warnings — heuristics. `acceptWarnings` waves these through as-is.
+  SUSPECT_SERIAL: 'suspect-serial',
+  SHORT_SERIAL: 'short-serial',
+  // Certain, and correctly skipped — re-importing these would be wrong.
+  BLANK_SERIAL: 'blank-serial',
+  BLANK_CODE: 'blank-code',
+  DUPLICATE_IN_FILE: 'duplicate-in-file',
+  ON_BILL: 'on-bill'
+};
+
+const RESOLVABLE = new Set([PROBLEM_KINDS.UNMATCHED_PRODUCT, PROBLEM_KINDS.AMBIGUOUS_PRODUCT]);
+const WARNINGS = new Set([PROBLEM_KINDS.SUSPECT_SERIAL, PROBLEM_KINDS.SHORT_SERIAL]);
+
+export const isResolvable = (kind) => RESOLVABLE.has(kind);
+export const isWarning = (kind) => WARNINGS.has(kind);
+
 // Sync, pure pre-flight for a serial import: resolves each row to a catalog product and runs the
 // same guards the scanner applies in BillingDesk.commitSerialUnit, minus the two that need the
 // network (registry + past invoices) — the modal layers those on top of `ready`.
-// Returns { ready: [{ rowNumber, code, serial, product }], problems: [{ rowNumber, code, serial, reason }] }.
-export const planSerialImport = ({ rows, codeColumn, serialColumn, products, existingSerials = [] }) => {
+//
+// Re-run it (rather than patching its output) whenever the operator resolves something: a row that
+// failed on an unmatched code never reached the duplicate checks, so those must be re-evaluated
+// once it becomes eligible. Cheap, and it keeps one source of truth for the rules.
+//
+// codeOverrides: { [NORMALIZED CODE]: product | 'skip' } — the operator's answer for a code the
+//   catalog couldn't resolve on its own.
+// acceptWarnings: wave through the heuristic warnings (suspect/short serials) exactly as typed.
+//
+// Returns { ready: [{ rowNumber, code, serial, raw, product }],
+//           problems: [{ rowNumber, code, serial, raw, kind, reason, matches? }] }.
+export const planSerialImport = ({
+  rows,
+  codeColumn,
+  serialColumn,
+  products,
+  existingSerials = [],
+  codeOverrides = {},
+  acceptWarnings = false
+}) => {
   const ready = [];
   const problems = [];
+  const skippedByOperator = [];
   const index = buildCodeIndex(products);
   const onBill = new Set(existingSerials.map(normalizeSerial).filter(Boolean));
   const seenInFile = new Map(); // normalized serial → the row number that claimed it first
@@ -371,46 +418,62 @@ export const planSerialImport = ({ rows, codeColumn, serialColumn, products, exi
   rows.forEach((row, i) => {
     const rowNumber = i + 2; // +1 header, +1 for 1-indexing — matches what Excel shows
     const code = String(row[codeColumn] ?? '').trim();
-    const rawSerial = String(row[serialColumn] ?? '').trim();
-    const serial = normalizeSerial(rawSerial);
-    const fail = (reason) => problems.push({ rowNumber, code, serial: rawSerial, reason });
+    const raw = String(row[serialColumn] ?? '').trim();
+    const serial = normalizeSerial(raw);
+    const fail = (kind, reason, extra) =>
+      problems.push({ rowNumber, code, serial, raw, kind, reason, ...extra });
 
-    if (!code && !rawSerial) return; // fully blank row — not worth reporting
+    if (!code && !raw) return; // fully blank row — not worth reporting
 
-    if (!rawSerial) { fail('Serial number is blank'); return; }
-    if (isScientificNotation(rawSerial)) {
-      fail(`Serial "${rawSerial}" lost its digits to Excel's number format — format the column as Text and re-save`);
+    if (!raw) { fail(PROBLEM_KINDS.BLANK_SERIAL, 'Serial number is blank'); return; }
+    if (!acceptWarnings && isScientificNotation(raw)) {
+      fail(PROBLEM_KINDS.SUSPECT_SERIAL,
+        `Serial "${raw}" looks like Excel turned it into a number — format the column as Text and re-save, or import it as-is`);
       return;
     }
-    if (serial.length < SERIAL_MIN_LENGTH) {
-      fail(`Serial "${rawSerial}" is too short (minimum ${SERIAL_MIN_LENGTH} characters)`);
+    if (!acceptWarnings && serial.length < SERIAL_MIN_LENGTH) {
+      fail(PROBLEM_KINDS.SHORT_SERIAL,
+        `Serial "${raw}" is too short (minimum ${SERIAL_MIN_LENGTH} characters)`);
       return;
     }
-    if (!code) { fail('Barcode / SKU is blank'); return; }
+    if (!code) { fail(PROBLEM_KINDS.BLANK_CODE, 'Barcode / SKU is blank'); return; }
+
+    const override = codeOverrides[normalizeCode(code)];
+    if (override === 'skip') { skippedByOperator.push({ rowNumber, code, serial }); return; }
 
     const matches = index.get(normalizeCode(code)) || [];
-    if (matches.length === 0) {
-      fail(`No product in the catalog matches "${code}"`);
-      return;
-    }
-    if (matches.length > 1) {
-      fail(`"${code}" matches ${matches.length} products (${matches.map((p) => p.name).join(' | ')}) — make the code unique first`);
+    const product = override || (matches.length === 1 ? matches[0] : null);
+
+    if (!product) {
+      if (matches.length === 0) {
+        fail(PROBLEM_KINDS.UNMATCHED_PRODUCT, `No product in the catalog matches "${code}"`, { matches: [] });
+      } else {
+        fail(PROBLEM_KINDS.AMBIGUOUS_PRODUCT,
+          `"${code}" matches ${matches.length} products (${matches.map((p) => p.name).join(' | ')}) — pick the right one`,
+          { matches });
+      }
       return;
     }
 
-    if (onBill.has(serial)) { fail(`Serial ${serial} is already on this bill`); return; }
+    if (onBill.has(serial)) {
+      fail(PROBLEM_KINDS.ON_BILL, `Serial ${serial} is already on this bill`);
+      return;
+    }
     const claimedBy = seenInFile.get(serial);
-    if (claimedBy) { fail(`Serial ${serial} is a duplicate of row ${claimedBy} in this file`); return; }
+    if (claimedBy) {
+      fail(PROBLEM_KINDS.DUPLICATE_IN_FILE, `Serial ${serial} is a duplicate of row ${claimedBy} in this file`);
+      return;
+    }
 
     seenInFile.set(serial, rowNumber);
-    ready.push({ rowNumber, code, serial, product: matches[0] });
+    ready.push({ rowNumber, code, serial, raw, product });
   });
 
-  return { ready, problems };
+  return { ready, problems, skippedByOperator };
 };
 
 export const buildSerialProblemRows = (problems) =>
-  problems.map((p) => [p.rowNumber, p.code, p.serial, p.reason]);
+  problems.map((p) => [p.rowNumber, p.code, p.raw ?? p.serial, p.reason]);
 
 // How many usable values each column holds. The serial check uses this to pre-select the right
 // column: a reconciliation sheet often pairs a full list against a VLOOKUP column that is only
