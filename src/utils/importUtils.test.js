@@ -154,9 +154,25 @@ describe('planSerialImport', () => {
   });
 
   it('rejects a serial Excel mangled into scientific notation', () => {
-    const res = plan([row('NH.QTREM.003', '1.23457e+21')]);
-    expect(res.ready).toHaveLength(0);
-    expect(res.problems[0].reason).toMatch(/format the column as Text/i);
+    for (const mangled of ['1.23457e+21', '1e+21', '1.5e-7']) {
+      const res = plan([row('NH.QTREM.003', mangled)]);
+      expect(res.ready).toHaveLength(0);
+      expect(res.problems[0].reason).toMatch(/format the column as Text/i);
+    }
+  });
+
+  // Regression: the scientific-notation guard used to be unanchored, so a digit-E-digit run
+  // ANYWHERE in a serial tripped it — blocking 24 real Acer serials in a single 200-row import.
+  it('accepts real serials that merely contain a digit-E-digit run', () => {
+    const serials = [
+      'NHQVUEM002538262E97600',   // ...262E976...
+      'NHQVUEM0025382629E7600',
+      'NHQVUEM0025232CD6E7600',
+      'NHQX5EM003536228E07600'
+    ];
+    const res = plan(serials.map((s) => row('NH.QTREM.003', s)));
+    expect(res.problems).toHaveLength(0);
+    expect(res.ready).toHaveLength(serials.length);
   });
 
   it('catches a duplicate within the file and names the row it collided with', () => {

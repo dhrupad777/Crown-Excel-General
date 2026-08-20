@@ -28,7 +28,7 @@ export const exportToCsv = ({ filename, headers, rows }) => {
   downloadBlob(filename, new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' }));
 };
 
-// sheets: [{ name, headers, rows, colWidths?: number[] }]
+// sheets: [{ name, headers, rows, colWidths?: number[], textColumns?: number[] }]
 // Async: ExcelJS is lazy-loaded on first download. Every workbook in the app now goes through the
 // same styled writer, so a product/customer/serial export looks like the invoice one.
 export const exportToXlsx = async ({ filename, sheets, title, subtitle }) =>

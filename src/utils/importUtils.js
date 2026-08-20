@@ -345,7 +345,17 @@ const buildCodeIndex = (products) => {
 
 // Excel stores a bare digit string as a NUMBER, so a serial over ~15 significant digits reads back
 // in scientific notation ("1.23457e+21") — importing that would register a corrupted serial.
-const isScientificNotation = (s) => /\d[eE][+-]?\d/.test(s);
+//
+// ANCHORED, and the exponent sign is REQUIRED — do not loosen either. This string only ever comes
+// from cellText's String(v) on a JS number, which always emits the sign ("1e+21"), so nothing
+// legitimate looks like this. An unanchored /\d[eE][+-]?\d/ matched a digit-E-digit run ANYWHERE
+// and blocked 24 real Acer serials in one import ("NHQVUEM00253826(2E9)7600").
+//
+// Known gap: JS only switches to scientific notation at 1e21, so a 16-21 digit all-numeric serial
+// stored as a number is rounded but still renders as plain digits and slips past. Telling that
+// apart from a legitimate 16-digit text serial needs the cell's original type, which
+// parseWorkbookFile discards; the import template's Text column formatting mitigates it instead.
+const isScientificNotation = (s) => /^[+-]?\d+(?:\.\d+)?[eE][+-]\d+$/.test(s);
 
 // Sync, pure pre-flight for a serial import: resolves each row to a catalog product and runs the
 // same guards the scanner applies in BillingDesk.commitSerialUnit, minus the two that need the

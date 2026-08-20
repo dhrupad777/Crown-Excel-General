@@ -87,12 +87,21 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     e.target.value = '';
   };
 
+  // The serial column ships pre-formatted as Excel "Text", so serials typed into the blank template
+  // keep their leading zeros and aren't rounded — the operator doesn't have to remember to set it.
+  // Resolved by header name rather than a hardcoded index so it can't drift if the headers change.
   const handleDownloadTemplate = async () => {
     try {
+      const serialCol = SERIAL_IMPORT_TEMPLATE_HEADERS.findIndex((h) => /serial/i.test(h));
       await exportToXlsx({
         filename: 'Crown_Excel_Serial_Import_Template.xlsx',
         subtitle: 'Blank import template — one row per unit: product barcode/SKU + its serial number',
-        sheets: [{ name: 'Template', headers: SERIAL_IMPORT_TEMPLATE_HEADERS, rows: [] }]
+        sheets: [{
+          name: 'Template',
+          headers: SERIAL_IMPORT_TEMPLATE_HEADERS,
+          rows: [],
+          textColumns: serialCol >= 0 ? [serialCol] : []
+        }]
       });
     } catch (err) {
       alert(`Could not build the template: ${err.message}`);
@@ -274,9 +283,10 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
             <div className="bg-amber-50 border-2 border-amber-200 rounded-xl p-3 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
               <p className="text-[11px] font-semibold text-amber-800">
-                Excel treats an all-digits serial as a <b>number</b>, which drops leading zeros and rounds anything
-                past ~15 digits. If your serials have leading zeros or are very long, format that column as
-                <b> Text</b> in Excel before saving.
+                The serial column in our <b>Blank Template</b> is already set to <b>Text</b>, so serials you type
+                keep their leading zeros. If you paste serials in from another sheet, use
+                <b> Paste Special → Values</b> — a plain paste carries the other sheet's formatting and Excel will
+                turn all-digit serials back into numbers.
               </p>
             </div>
 

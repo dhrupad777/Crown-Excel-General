@@ -32,7 +32,12 @@ const autoWidth = (header, rows, colIndex) => {
  * @param {string}   opts.filename
  * @param {string}   opts.title      big brand line (row 1)
  * @param {string}   opts.subtitle   context line (row 2)
- * @param {Array}    opts.sheets     [{ name, headers, rows, colWidths?, noFilter? }]
+ * @param {Array}    opts.sheets     [{ name, headers, rows, colWidths?, noFilter?, textColumns? }]
+ *
+ * textColumns: 0-based column indexes to mark as Excel "Text" (numFmt '@'). Excel otherwise reads
+ * an all-digits value as a NUMBER — dropping leading zeros and rounding past ~15 significant
+ * digits, which corrupts serial numbers. Declared at COLUMN level on purpose: that is what makes
+ * empty cells inherit it, so values typed into a blank template later stay text too.
  */
 export const writeStyledWorkbook = async ({ filename, title, subtitle, sheets }) => {
   const mod = await import('exceljs');
@@ -46,7 +51,10 @@ export const writeStyledWorkbook = async ({ filename, title, subtitle, sheets })
     const ws = wb.addWorksheet(sheet.name.slice(0, 31));
     const colCount = sheet.headers.length;
     const widths = sheet.colWidths || sheet.headers.map((h, i) => autoWidth(h, sheet.rows, i));
-    ws.columns = widths.map((w) => ({ width: w }));
+    const textColumns = new Set(sheet.textColumns || []);
+    ws.columns = widths.map((w, i) => (
+      textColumns.has(i) ? { width: w, style: { numFmt: '@' } } : { width: w }
+    ));
 
     // --- Title block (rows 1-3) ---
     ws.mergeCells(1, 1, 1, colCount);
