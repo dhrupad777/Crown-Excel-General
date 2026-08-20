@@ -21,10 +21,12 @@ import {
   Hash,
   Package,
   ScanLine,
-  Layers
+  Layers,
+  FileSpreadsheet
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Modal } from '../components/Modal';
+import { ImportSerialsModal } from '../components/ImportSerialsModal';
 import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
@@ -68,6 +70,8 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
   // of the product name doesn't clobber their explicit choice.
   const [categoryTouched, setCategoryTouched] = useState(false);
 
+  const [showImportSerials, setShowImportSerials] = useState(false);
+
   const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
   const [newCustomerForm, setNewCustomerForm] = useState({ name: '', company: '', whatsapp: '', email: '' });
 
@@ -81,13 +85,12 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
   // time; it's required and must be unique (both enforced on save in handleFinalizeBill).
   const [invoiceNumber, setInvoiceNumber] = useState('');
 
-  // Continue-Existing mode: append this device's units (tagged with its store) to a bill already in
-  // the region's shared database. `continuing` holds the loaded invoice; its existing items are
-  // shown locked and its number/partner are pinned. `items` still holds only THIS session's new
-  // units, so removal/dup logic stays simple and only new serials get registered.
+  // Continue mode: append this device's units (tagged with its store) to an open DRAFT another
+  // store in the region started. Entered only from the Drafts tab ("Add items"). `continuing` holds
+  // the loaded draft; its existing items are shown locked and its number/partner are pinned.
+  // `items` still holds only THIS session's new units, so removal/dup logic stays simple and only
+  // new serials get registered.
   const [continuing, setContinuing] = useState(null);
-  const [showContinuePicker, setShowContinuePicker] = useState(false);
-  const [continueSearch, setContinueSearch] = useState('');
   const lockedItems = continuing?.items || [];
 
   // A bill with scanned items but no saved invoice is unfinalized work. Report that "dirty" state
@@ -176,6 +179,29 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
       locationId: myStoreId,
       locationName: myStoreName
     }, ...prev]);
+  };
+
+  // Bulk sibling of addItemToBill for the Excel import: same row shape (so store tagging stays
+  // defined in one place), one state update for the whole batch. The id carries the row index as
+  // well as a random suffix — every row here is created inside the SAME millisecond, so
+  // `Date.now()` alone would hand them all the same id.
+  const addItemsToBill = (entries) => {
+    const ts = Date.now();
+    const newItems = entries.map(({ product, serial }, i) => ({
+      id: `${product.id}-${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+      productId: product.id,
+      barcode: product.barcode,
+      name: product.name,
+      sku: product.sku || '',
+      category: product.category || 'Electronics',
+      qty: 1,
+      unit: product.unit || 'Box',
+      imei: serial,
+      locationId: myStoreId,
+      locationName: myStoreName
+    }));
+    setItems((prev) => [...newItems, ...prev]);
+    audioService.playBeep();
   };
 
   // Commits whatever's in the serial input as one new unit of the active product, then clears
@@ -430,7 +456,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     setContinuing(null);
   };
 
-  // Loads an existing regional invoice into "continue" mode: pin its number + partner, show its
+  // Loads an open regional draft into "continue" mode: pin its number + partner, show its
   // items locked, and start a fresh set of units (tagged to THIS store) to append.
   const startContinuing = (inv) => {
     setContinuing(inv);
@@ -440,8 +466,6 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     setActiveProduct(null);
     setActiveSerial('');
     setSerialWarning('');
-    setShowContinuePicker(false);
-    setContinueSearch('');
   };
 
   const cancelContinuing = () => {
@@ -458,93 +482,6 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     if (inv) startContinuing(inv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [continueDraftId]);
-
-  // Generates a plausible 15-digit demo serial number for quick demo bills
-  const generateDemoImei = () => Array.from({ length: 15 }, () => Math.floor(Math.random() * 10)).join('');
-
-  // Instantly fills a sample bill (random catalog items + a random existing partner)
-  // Used for demos, training new operators, and quick UI testing.
-  const handleLoadDemoBill = () => {
-    const products = storageService.getProducts();
-    if (products.length === 0) {
-      alert('No products in the catalog yet — add a device before loading a demo bill.');
-      return;
-    }
-
-    const shuffled = [...products].sort(() => Math.random() - 0.5);
-    const picked = shuffled.slice(0, Math.min(3, shuffled.length));
-
-    // Every product is serial-tracked: one row per physical unit (each with its own unique
-    // serial), matching the same rule the active-product serial stream enforces.
-    const demoItems = picked.flatMap((product) => {
-      const unitCount = Math.floor(1 + Math.random() * 2); // 1-2 units, each its own row
-      return Array.from({ length: unitCount }, (_, i) => ({
-        id: `${product.id}-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
-        productId: product.id,
-        barcode: product.barcode,
-        name: product.name,
-        sku: product.sku || '',
-        category: product.category || 'Electronics',
-        qty: 1,
-        unit: product.unit || 'Box',
-        imei: generateDemoImei()
-      }));
-    });
-
-    setItems((prev) => [...demoItems, ...prev]);
-    setActiveProduct(null);
-    setActiveSerial('');
-    setSerialWarning('');
-
-    if (!selectedCustomer) {
-      const customers = storageService.getCustomers();
-      if (customers.length > 0) {
-        setSelectedCustomer(customers[Math.floor(Math.random() * customers.length)]);
-      }
-    }
-
-    audioService.playBeep();
-  };
-
-  // Loads a single-product bill carrying a large batch of serials — for eyeballing the invoice /
-  // PDF print layout under a heavy serial count. Serials are random throwaway values, so this
-  // bypasses the scan-time duplicate guards by design.
-  const SERIAL_STRESS_COUNT = 250;
-  const handleLoadSerialStressBill = () => {
-    const products = storageService.getProducts();
-    if (products.length === 0) {
-      alert('No products in the catalog yet — add a device before loading a demo bill.');
-      return;
-    }
-
-    const product = products[Math.floor(Math.random() * products.length)];
-    const ts = Date.now();
-    const demoItems = Array.from({ length: SERIAL_STRESS_COUNT }, (_, i) => ({
-      id: `${product.id}-${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
-      productId: product.id,
-      barcode: product.barcode,
-      name: product.name,
-      sku: product.sku || '',
-      category: product.category || 'Electronics',
-      qty: 1,
-      unit: product.unit || 'Box',
-      imei: generateDemoImei()
-    }));
-
-    setItems((prev) => [...demoItems, ...prev]);
-    setActiveProduct(null);
-    setActiveSerial('');
-    setSerialWarning('');
-
-    if (!selectedCustomer) {
-      const customers = storageService.getCustomers();
-      if (customers.length > 0) {
-        setSelectedCustomer(customers[Math.floor(Math.random() * customers.length)]);
-      }
-    }
-
-    audioService.playBeep();
-  };
 
   const getCategoryIcon = (category) => {
     switch (category) {
@@ -574,31 +511,18 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
           {/* Top Control Bar: Invoice Date/Time & Manual Product Search */}
           <div className="bg-white border-2 border-slate-300 rounded-2xl p-6 space-y-5 shadow-md border-t-4 border-t-[#2563eb]">
 
-            {/* New vs Continue — continue appends this device's units (tagged to its store) to a bill
-                already in the region's shared database (created by another store). */}
-            {continuing ? (
+            {/* Continuing an open draft — appends this device's units (tagged to its store) to a
+                draft another store in the region started. Entered from the Drafts tab. */}
+            {continuing && (
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-50 border-2 border-amber-300 rounded-xl px-4 py-3">
                 <div className="text-xs font-bold text-amber-800 flex items-center gap-2">
                   <Layers className="w-4 h-4 flex-shrink-0" />
                   <span>
-                    Continuing invoice <b className="font-mono">{continuing.invoiceNo || continuing.id}</b> — {lockedItems.length} existing unit{lockedItems.length === 1 ? '' : 's'}. New units are added to your store.
+                    Adding to draft <b className="font-mono">{continuing.invoiceNo || continuing.id}</b> — {lockedItems.length} existing unit{lockedItems.length === 1 ? '' : 's'}. New units are added to your store.
                   </span>
                 </div>
                 <button type="button" onClick={cancelContinuing} className="text-xs font-black text-amber-700 hover:text-amber-900 bg-white border-2 border-amber-300 px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
                   Cancel
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider">Billing mode:</span>
-                <span className="text-xs font-black text-[#2563eb] bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg">New Invoice</span>
-                <button
-                  type="button"
-                  onClick={() => setShowContinuePicker(true)}
-                  className="text-xs font-bold text-slate-600 hover:text-[#2563eb] bg-slate-50 border-2 border-slate-200 hover:border-[#2563eb] px-2.5 py-1 rounded-lg flex items-center gap-1.5"
-                  title="Add your store's units to a bill another store already started in this region"
-                >
-                  <Layers className="w-3.5 h-3.5" /> Continue an existing invoice
                 </button>
               </div>
             )}
@@ -631,7 +555,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
                     required
                     disabled={!!continuing}
                     className="input-field mt-0.5 py-1.5 px-2.5 w-40 text-sm font-mono font-black text-emerald-700 bg-white border-emerald-300 sm:text-right disabled:bg-slate-100 disabled:text-slate-500"
-                    title={continuing ? 'Fixed while continuing an existing invoice' : 'Required — must be unique'}
+                    title={continuing ? "Fixed while adding to an existing draft" : 'Required — must be unique'}
                   />
                 </div>
               </div>
@@ -647,19 +571,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
                 <div className="flex items-center gap-2 self-start sm:self-auto">
                   <button
                     type="button"
-                    onClick={handleLoadDemoBill}
-                    title="Instantly fill a sample bill with random catalog items and a demo partner"
-                    className="text-purple-700 hover:text-purple-900 font-heading text-xs flex items-center gap-1 font-black bg-purple-50 px-3 py-1.5 rounded-lg border-2 border-purple-200 shadow-sm"
+                    onClick={() => setShowImportSerials(true)}
+                    title="Upload a sheet of barcode/SKU + serial number to add every unit to this bill at once"
+                    className="text-[#2563eb] hover:text-blue-800 font-heading text-xs flex items-center gap-1 font-black bg-blue-50 px-3 py-1.5 rounded-lg border-2 border-blue-200 shadow-sm"
                   >
-                    <Sparkles className="w-3.5 h-3.5" /> Load Demo Bill
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleLoadSerialStressBill}
-                    title="Load one product with 250 serials to preview the invoice / PDF print layout"
-                    className="text-purple-700 hover:text-purple-900 font-heading text-xs flex items-center gap-1 font-black bg-purple-50 px-3 py-1.5 rounded-lg border-2 border-purple-200 shadow-sm"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" /> Demo: 250 Serials
+                    <FileSpreadsheet className="w-3.5 h-3.5" /> Import Serials from Excel
                   </button>
                   <button
                     type="button"
@@ -1086,59 +1002,13 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
 
       </div>
 
-      {/* --- CONTINUE-EXISTING INVOICE PICKER --- */}
-      <Modal
-        isOpen={showContinuePicker}
-        onClose={() => { setShowContinuePicker(false); setContinueSearch(''); }}
-        title="Continue an existing invoice"
-        subtitle="Add your store's units to a bill already started in this region. Pick the invoice below."
-        icon={Layers}
-        maxWidth="max-w-xl"
-      >
-        <div className="space-y-4 font-body">
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={continueSearch}
-              onChange={(e) => setContinueSearch(e.target.value)}
-              placeholder="Search by invoice # or partner…"
-              autoFocus
-              className="input-field pl-10 py-2.5 text-sm bg-white border-slate-300 font-bold text-slate-900 w-full rounded-xl"
-            />
-          </div>
-          <div className="max-h-80 overflow-y-auto border-2 border-slate-200 rounded-xl divide-y divide-slate-100">
-            {(() => {
-              const q = continueSearch.trim().toLowerCase();
-              const list = storageService.getInvoices()
-                .filter((inv) => !q
-                  || `${inv.invoiceNo || inv.id} ${inv.customer?.company || ''} ${inv.customer?.name || ''}`.toLowerCase().includes(q))
-                .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
-                .slice(0, 50);
-              if (list.length === 0) {
-                return <p className="p-6 text-center text-xs font-semibold text-slate-400">No invoices in your region match.</p>;
-              }
-              return list.map((inv) => (
-                <button
-                  key={inv.id}
-                  type="button"
-                  onClick={() => startContinuing(inv)}
-                  className="w-full text-left p-3 hover:bg-blue-50/60 transition-colors flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <div className="font-mono font-black text-sm text-slate-900">{inv.invoiceNo || inv.id}</div>
-                    <div className="text-[11px] font-bold text-slate-500 truncate">{customerPrimaryName(inv.customer)}</div>
-                  </div>
-                  <div className="text-right flex-shrink-0">
-                    <div className="text-[11px] font-bold text-slate-600">{(inv.items || []).length} unit{(inv.items || []).length === 1 ? '' : 's'}</div>
-                    <div className="text-[10px] font-semibold text-slate-400">{new Date(inv.date).toLocaleDateString()}</div>
-                  </div>
-                </button>
-              ));
-            })()}
-          </div>
-        </div>
-      </Modal>
+      {/* --- BULK SERIAL IMPORT (Excel/CSV → bill units) --- */}
+      <ImportSerialsModal
+        isOpen={showImportSerials}
+        onClose={() => setShowImportSerials(false)}
+        existingSerials={[...items, ...lockedItems].map((i) => i.imei).filter(Boolean)}
+        onAdd={addItemsToBill}
+      />
 
       {/* --- MODAL 1: Instant New Product Registration --- */}
       <Modal

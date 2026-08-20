@@ -3,6 +3,7 @@
 // client's old sheets, or a blank template all round-trip without manual renaming.
 
 import { storageService } from '../services/storage';
+import { normalizeSerial, SERIAL_MIN_LENGTH } from '../config/appConfig';
 
 // Coerces one ExcelJS cell value to plain text. Cells aren't always primitives: formulas arrive
 // as { result }, styled text as { richText }, links as { hyperlink, text }.
@@ -121,7 +122,7 @@ const normalizeHeader = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, '')
 // Finds the value in `row` whose (normalized) header matches an alias. EXACT matches win over
 // substring ones: matching loosely in column order used to grab the wrong column — a sheet with
 // "Model" before "Device Name" mapped the SKU into the product name.
-const pickField = (row, aliases) => {
+export const pickField = (row, aliases) => {
   const keys = Object.keys(row);
   for (const key of keys) {
     if (aliases.includes(normalizeHeader(key))) return String(row[key]).trim();
@@ -309,6 +310,97 @@ export const importCustomers = async (rows, { onDuplicate = 'skip', defaultTeamI
 
   return result;
 };
+
+// --- SERIAL IMPORT (Billing Desk: a supplier sheet of product code + serial → bill units) ---
+
+export const SERIAL_IMPORT_TEMPLATE_HEADERS = ['Barcode / SKU', 'Serial Number'];
+
+// Suppliers label the product-code column inconsistently, and this business uses `barcode` and
+// `sku` interchangeably (most products carry the manufacturer part number in BOTH, and some — like
+// the Acer NH.* codes — carry it in `barcode` with `sku` left empty). So one alias list covers both
+// and the matcher below checks both fields.
+export const PRODUCT_CODE_ALIASES = ['barcode', 'sku', 'modelsku', 'modelnumber', 'partnumber', 'itemcode', 'productcode'];
+export const SERIAL_ALIASES = ['serialnumber', 'serial', 'serialno', 'imei'];
+
+const normalizeCode = (s) => String(s ?? '').trim().toUpperCase();
+
+// Product lookup keyed by BOTH barcode and sku. A code that resolves to more than one distinct
+// product is left ambiguous on purpose — one product's barcode really can be another's sku, and
+// silently picking the first would attribute units to the wrong device.
+const buildCodeIndex = (products) => {
+  const index = new Map();
+  const add = (code, product) => {
+    const key = normalizeCode(code);
+    if (!key) return;
+    const bucket = index.get(key);
+    if (!bucket) { index.set(key, [product]); return; }
+    if (!bucket.some((p) => p.id === product.id)) bucket.push(product);
+  };
+  for (const p of products) {
+    add(p.barcode, p);
+    add(p.sku, p);
+  }
+  return index;
+};
+
+// Excel stores a bare digit string as a NUMBER, so a serial over ~15 significant digits reads back
+// in scientific notation ("1.23457e+21") — importing that would register a corrupted serial.
+const isScientificNotation = (s) => /\d[eE][+-]?\d/.test(s);
+
+// Sync, pure pre-flight for a serial import: resolves each row to a catalog product and runs the
+// same guards the scanner applies in BillingDesk.commitSerialUnit, minus the two that need the
+// network (registry + past invoices) — the modal layers those on top of `ready`.
+// Returns { ready: [{ rowNumber, code, serial, product }], problems: [{ rowNumber, code, serial, reason }] }.
+export const planSerialImport = ({ rows, codeColumn, serialColumn, products, existingSerials = [] }) => {
+  const ready = [];
+  const problems = [];
+  const index = buildCodeIndex(products);
+  const onBill = new Set(existingSerials.map(normalizeSerial).filter(Boolean));
+  const seenInFile = new Map(); // normalized serial → the row number that claimed it first
+
+  rows.forEach((row, i) => {
+    const rowNumber = i + 2; // +1 header, +1 for 1-indexing — matches what Excel shows
+    const code = String(row[codeColumn] ?? '').trim();
+    const rawSerial = String(row[serialColumn] ?? '').trim();
+    const serial = normalizeSerial(rawSerial);
+    const fail = (reason) => problems.push({ rowNumber, code, serial: rawSerial, reason });
+
+    if (!code && !rawSerial) return; // fully blank row — not worth reporting
+
+    if (!rawSerial) { fail('Serial number is blank'); return; }
+    if (isScientificNotation(rawSerial)) {
+      fail(`Serial "${rawSerial}" lost its digits to Excel's number format — format the column as Text and re-save`);
+      return;
+    }
+    if (serial.length < SERIAL_MIN_LENGTH) {
+      fail(`Serial "${rawSerial}" is too short (minimum ${SERIAL_MIN_LENGTH} characters)`);
+      return;
+    }
+    if (!code) { fail('Barcode / SKU is blank'); return; }
+
+    const matches = index.get(normalizeCode(code)) || [];
+    if (matches.length === 0) {
+      fail(`No product in the catalog matches "${code}"`);
+      return;
+    }
+    if (matches.length > 1) {
+      fail(`"${code}" matches ${matches.length} products (${matches.map((p) => p.name).join(' | ')}) — make the code unique first`);
+      return;
+    }
+
+    if (onBill.has(serial)) { fail(`Serial ${serial} is already on this bill`); return; }
+    const claimedBy = seenInFile.get(serial);
+    if (claimedBy) { fail(`Serial ${serial} is a duplicate of row ${claimedBy} in this file`); return; }
+
+    seenInFile.set(serial, rowNumber);
+    ready.push({ rowNumber, code, serial, product: matches[0] });
+  });
+
+  return { ready, problems };
+};
+
+export const buildSerialProblemRows = (problems) =>
+  problems.map((p) => [p.rowNumber, p.code, p.serial, p.reason]);
 
 // How many usable values each column holds. The serial check uses this to pre-select the right
 // column: a reconciliation sheet often pairs a full list against a VLOOKUP column that is only

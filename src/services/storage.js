@@ -29,67 +29,8 @@ const DRAFT_WINDOW_MS = 2 * 24 * 60 * 60 * 1000; // a draft invoice stays open f
 
 const INVOICE_NUMBER_START = 10000;
 
-// Every product is sold as exactly one box per unit — there is no separate stock count to
-// maintain here; the Invoices Archive (searchable by serial) is the real record of what's sold.
-const INITIAL_PRODUCTS = [
-  { id: 'prod-101', barcode: '8801001', name: 'MacBook Pro 16-inch M3 Max (36GB RAM, 1TB SSD - Space Black)', category: 'Laptops', unit: 'Box' },
-  { id: 'prod-102', barcode: '8801002', name: 'iPhone 15 Pro Max (256GB - Natural Titanium)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-103', barcode: '8801003', name: 'Samsung Galaxy S24 Ultra (512GB - Titanium Black)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-104', barcode: '8801004', name: 'iPad Pro 13-inch M4 (256GB - Wi-Fi + Cellular)', category: 'Tablets', unit: 'Box' },
-  { id: 'prod-105', barcode: '8801005', name: 'Sony WH-1000XM5 Wireless Noise-Canceling Headphones', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-106', barcode: '8801006', name: 'Dell XPS 15 (i9-13900H, RTX 4070, 32GB RAM, 1TB OLED)', category: 'Laptops', unit: 'Box' },
-  { id: 'prod-107', barcode: '8801007', name: 'Apple Watch Ultra 2 (49mm Titanium - Ocean Band)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-108', barcode: '8801008', name: 'AirPods Pro (2nd Gen with MagSafe USB-C)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-109', barcode: '8801009', name: 'PlayStation 5 Slim Console (1TB Disc Edition)', category: 'Gaming', unit: 'Box' },
-  { id: 'prod-110', barcode: '8801010', name: 'Anker 140W 3-Port USB-C High-Speed Fast Charger', category: 'Accessories', unit: 'Box' },
-  // Apple lineup
-  { id: 'prod-111', barcode: '8801011', name: 'iPhone 15 (128GB - Blue)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-112', barcode: '8801012', name: 'iPhone 15 Plus (256GB - Pink)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-113', barcode: '8801013', name: 'iPhone 15 Pro (256GB - Blue Titanium)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-114', barcode: '8801014', name: 'iPhone 16 Pro Max (256GB - Desert Titanium)', category: 'Mobile Phones', unit: 'Box' },
-  { id: 'prod-115', barcode: '8801015', name: 'iPad (10th Gen, 64GB - Wi-Fi, Blue)', category: 'Tablets', unit: 'Box' },
-  { id: 'prod-116', barcode: '8801016', name: 'iPad Air 13-inch (M2, 256GB - Wi-Fi, Starlight)', category: 'Tablets', unit: 'Box' },
-  { id: 'prod-117', barcode: '8801017', name: 'iPad mini (A17 Pro, 128GB - Starlight)', category: 'Tablets', unit: 'Box' },
-  { id: 'prod-118', barcode: '8801018', name: 'MacBook Air 15-inch (M3, 16GB RAM, 512GB SSD - Midnight)', category: 'Laptops', unit: 'Box' },
-  { id: 'prod-119', barcode: '8801019', name: 'MacBook Pro 14-inch (M3 Pro, 18GB RAM, 512GB SSD - Space Black)', category: 'Laptops', unit: 'Box' },
-  { id: 'prod-120', barcode: '8801020', name: 'Apple Watch Series 10 (46mm GPS + Cellular - Jet Black)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-121', barcode: '8801021', name: 'Apple Watch SE (40mm GPS - Starlight)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-122', barcode: '8801022', name: 'AirPods 4 (Active Noise Cancellation)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-123', barcode: '8801023', name: 'AirPods Max (USB-C - Midnight)', category: 'Audio & Wearables', unit: 'Box' },
-  { id: 'prod-124', barcode: '8801024', name: 'Apple 20W USB-C Power Adapter', category: 'Accessories', unit: 'Box' },
-  { id: 'prod-125', barcode: '8801025', name: 'Apple MagSafe Charger (USB-C)', category: 'Accessories', unit: 'Box' }
-];
-
-const INITIAL_CUSTOMERS = [
-  { id: 'cust-1', name: 'Rajesh Kumar', company: 'Omega Tech Solutions Ltd', whatsapp: '+91 98765 43210', email: 'rajesh@omegatech.com', ordersCount: 4 },
-  { id: 'cust-2', name: 'Vikram Mehta', company: 'Apex Mobile & Gadgets Hub', whatsapp: '+91 91234 56789', email: 'vikram@apexgadgets.com', ordersCount: 5 },
-  { id: 'cust-3', name: 'Sarah Jenkins', company: 'Global Electronics Enterprises', whatsapp: '+1 415 555 0199', email: 's.jenkins@globalelec.com', ordersCount: 11 },
-  { id: 'cust-4', name: 'Anil Sharma', company: 'Metro IT & Cloud Infrastructure', whatsapp: '+91 98111 22334', email: 'anil@metroit.in', ordersCount: 2 }
-];
-
-const INITIAL_INVOICES = [
-  {
-    id: 'INV-88901',
-    date: new Date(Date.now() - 86400000 * 2).toISOString(),
-    customer: { id: 'cust-1', name: 'Rajesh Kumar (Omega Tech Solutions)', whatsapp: '+91 98765 43210', email: 'rajesh@omegatech.com' },
-    items: [
-      { id: 'prod-102', barcode: '8801002', name: 'iPhone 15 Pro Max (256GB - Natural Titanium)', qty: 2, unit: 'Box', imei: '358923009182391 / 358923009182392' },
-      { id: 'prod-108', barcode: '8801008', name: 'AirPods Pro (2nd Gen with MagSafe USB-C)', qty: 2, unit: 'Box', imei: '' }
-    ]
-  },
-  {
-    id: 'INV-88902',
-    date: new Date(Date.now() - 86400000).toISOString(),
-    customer: { id: 'cust-2', name: 'Vikram Mehta (Apex Mobile & Gadgets)', whatsapp: '+91 91234 56789', email: 'vikram@apexgadgets.com' },
-    items: [
-      { id: 'prod-101', barcode: '8801001', name: 'MacBook Pro 16-inch M3 Max (36GB RAM, 1TB SSD - Space Black)', qty: 1, unit: 'Box', imei: 'SN: C02G9012MD6R' }
-    ]
-  }
-];
-
 class StorageService {
   constructor() {
-    this.initSeedData();
     // Cloud sync no longer auto-starts here: Firestore is locked behind staff authentication,
     // so AuthContext calls initCloudSync() after a verified login (and stopCloudSync() on
     // sign-out). Starting it unauthenticated would just spin permission-denied listeners.
@@ -200,18 +141,6 @@ class StorageService {
 
   _isAdmin() {
     return this._currentUser?.role === 'admin';
-  }
-
-  initSeedData() {
-    if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) {
-      this._setItem(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
-    }
-    if (!localStorage.getItem(STORAGE_KEYS.CUSTOMERS)) {
-      this._setItem(STORAGE_KEYS.CUSTOMERS, INITIAL_CUSTOMERS);
-    }
-    if (!localStorage.getItem(STORAGE_KEYS.INVOICES)) {
-      this._setItem(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
-    }
   }
 
   // Persists to localStorage, surfacing quota/private-browsing failures instead of losing data silently.
@@ -644,8 +573,14 @@ class StorageService {
   // A draft is an open bill (status 'draft') that stores in a region append serials to over up to
   // 2 days, then save as final. Absent status = 'final' so every legacy invoice is unaffected.
   // Cancelled drafts are soft-deleted (deleted:true), so getInvoices already hides them.
+  // Drafts are scoped to the caller's REGION — Dubai stores see every Dubai draft, Nigeria stores
+  // see every Nigeria draft, admins see all. The cloud subscription is already team-scoped for
+  // non-admins, but the local mirror can still hold another team's rows (an admin session on this
+  // device, or a team reassignment) until the next snapshot replaces it — so filter on read too.
   getDrafts() {
-    return this.getInvoices().filter((i) => i.status === 'draft');
+    const team = this._currentTeamId();
+    return this.getInvoices().filter((i) =>
+      i.status === 'draft' && (this._isAdmin() || (i.teamId || '') === team));
   }
 
   getFinalInvoices() {
@@ -1555,7 +1490,7 @@ class StorageService {
 
     const totalItemsSold = invoices.reduce((sum, inv) => sum + (inv.items?.reduce((s, i) => s + (i.qty || 0), 0) || 0), 0);
     const openQueries = invoices.filter((inv) => inv.query && !inv.query.resolved).length;
-    const drafts = invoices.filter((inv) => inv.status === 'draft');
+    const drafts = this.getDrafts();
     const expiredDrafts = drafts.filter((inv) => this.isDraftExpired(inv)).length;
 
     return {
@@ -1568,29 +1503,6 @@ class StorageService {
       draftsCount: drafts.length,
       expiredDrafts
     };
-  }
-
-  resetToDemoData() {
-    // Stamp the seed with the current admin's team so it isn't orphaned/rejected under the
-    // per-team rules; invoices also get a human `invoiceNo` mirroring their id.
-    const team = this._currentTeamId();
-    const products = INITIAL_PRODUCTS.map(p => ({ ...p, teamId: team }));
-    const customers = INITIAL_CUSTOMERS.map(c => ({ ...c, teamId: team }));
-    const invoices = INITIAL_INVOICES.map(inv => ({ ...inv, teamId: team, invoiceNo: inv.invoiceNo || inv.id }));
-    const ok = [
-      this._setItem(STORAGE_KEYS.PRODUCTS, products),
-      this._setItem(STORAGE_KEYS.CUSTOMERS, customers),
-      this._setItem(STORAGE_KEYS.INVOICES, invoices)
-    ].every(Boolean);
-    if (!ok) return false;
-
-    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
-
-    // Push reset seed data to live Firebase cloud!
-    products.forEach(p => firebaseService.saveToCloud('products', p.id, p));
-    customers.forEach(c => firebaseService.saveToCloud('customers', c.id, c));
-    invoices.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
-    return true;
   }
 
   // One-time migration to the team model. Stamps `teamId` on every existing record:

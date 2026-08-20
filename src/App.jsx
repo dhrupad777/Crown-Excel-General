@@ -1,7 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Database,
-  RefreshCw,
   Upload,
   ShieldCheck,
   CheckCircle2,
@@ -84,19 +83,6 @@ export function App() {
     firebaseService.saveConfig(firebaseConfig);
     setConfigSaved(true);
     setTimeout(() => setConfigSaved(false), 3000);
-  };
-
-  // Handle Reset to Demo Data
-  const handleResetDemo = () => {
-    if (window.confirm("WARNING: This will replace all current data with the initial Crown Excel General demo database. Continue?")) {
-      const success = storageService.resetToDemoData();
-      if (success) {
-        alert("Database reset to demo state successfully!");
-        window.location.reload();
-      } else {
-        alert("Reset failed: could not write to local storage (device storage may be full).");
-      }
-    }
   };
 
   // --- Backups: automatic on-device snapshots, downloaded on demand from Admin → Backups ---
@@ -250,7 +236,7 @@ export function App() {
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
         title="⚙️ System Settings & Data Engine"
-        subtitle="Configure Firebase cloud sync, backup database, or reset demo data."
+        subtitle="Configure Firebase cloud sync, back up the database, or restore from a backup."
         icon={Database}
         maxWidth="max-w-2xl"
       >
@@ -331,16 +317,6 @@ export function App() {
                 <b className="text-indigo-700"> Admin → Backups</b> whenever you like. Last backup: <b className="text-slate-700">{relativeBackup(lastBackupAt)}</b>.
               </div>
             </div>
-
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={handleResetDemo}
-                className="btn btn-outline w-full text-amber-600 border-amber-300 hover:bg-amber-50 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5"
-              >
-                <RefreshCw className="w-4 h-4" /> Reset to Demo Database
-              </button>
-            )}
 
             {/* Import Box (admin only — restores products/customers/invoices; the serial
                 registry is create-only in the cloud and is never restored from backups) */}

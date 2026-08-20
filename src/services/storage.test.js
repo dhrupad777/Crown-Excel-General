@@ -56,6 +56,24 @@ describe('draft invoice lifecycle', () => {
     expect(storageService.getDashboardStats().invoicesCount).toBe(0); // drafts excluded from the archive count
   });
 
+  it('a store only sees its own region\'s drafts; an admin sees every region', () => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([
+      { id: 'loc-1', team: 'Dubai', active: true },
+      { id: 'loc-9', team: 'Nigeria', active: true }
+    ]));
+    makeDraft();
+    makeDraft({ id: 'Nigeria__N1', invoiceNo: 'N1', teamId: 'Nigeria' });
+
+    // Dubai store
+    expect(storageService.getDrafts().map((d) => d.id)).toEqual(['Dubai__D1']);
+    // Nigeria store
+    storageService.setCurrentUser({ email: 'ng@b.com', role: 'standard', locationId: 'loc-9' });
+    expect(storageService.getDrafts().map((d) => d.id)).toEqual(['Nigeria__N1']);
+    // Admin
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+    expect(storageService.getDrafts()).toHaveLength(2);
+  });
+
   it('isDraftExpired only past the window', () => {
     expect(storageService.isDraftExpired({ status: 'draft', draftExpiresAt: Date.now() + 1000 })).toBe(false);
     expect(storageService.isDraftExpired({ status: 'draft', draftExpiresAt: Date.now() - 1000 })).toBe(true);
