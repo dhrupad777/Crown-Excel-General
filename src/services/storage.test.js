@@ -361,6 +361,27 @@ describe('registerSerialsFromInvoice — completeness', () => {
     expect(byId['SN-SHOP']).toBe('loc-shop');
   });
 
+  // Provenance must survive onto the PERMANENT registry record, not just live on the bill: months
+  // later it has to be clear that a unit arrived via the Excel importer, and whether an operator
+  // override put it under this product.
+  it('carries item source/remarks onto the registered serial', async () => {
+    await storageService.registerSerialsFromInvoice({
+      invoiceNo: 'X', teamId: 'Dubai', locationId: 'loc-1', customer: { company: 'ACME' },
+      items: [
+        { name: 'W', imei: 'SN-IMPORTED', source: 'import', remarks: 'Imported from "s.xlsx" — sheet code "NX.A" mapped to this product by Nadeem' },
+        { name: 'W', imei: 'SN-SCANNED' }
+      ]
+    });
+    const byId = Object.fromEntries(
+      firebaseService.createIfAbsent.mock.calls.map((c) => [c[2].serial, c[2]])
+    );
+    expect(byId['SN-IMPORTED'].source).toBe('import');
+    expect(byId['SN-IMPORTED'].remarks).toMatch(/mapped to this product by Nadeem/);
+    // A gun-scanned unit is unaffected — it stays a plain billing registration.
+    expect(byId['SN-SCANNED'].source).toBe('billing');
+    expect(byId['SN-SCANNED'].remarks).toBe('');
+  });
+
   // A continued bill (or a re-run) must only write the NEW units, not re-process everything.
   it('skips serials already in the registry', async () => {
     storageService._serialsCache = [{ id: 'SN-OLD', serial: 'SN-OLD', teamId: 'Dubai' }];

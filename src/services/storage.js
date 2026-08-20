@@ -1292,8 +1292,11 @@ class StorageService {
         invoiceNo: invNo,
         locationId: storeId,
         locationName: this.getLocationName(storeId),
-        remarks: '',
-        source: 'billing',
+        // Provenance travels on the ITEM so it survives onto the permanent registry record: a unit
+        // added by the Excel importer carries how it got there (and any operator override that made
+        // it possible), a gun-scanned one stays plain 'billing'.
+        remarks: item.remarks || '',
+        source: item.source || 'billing',
         batchId: invNo,
         teamId
       });

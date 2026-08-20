@@ -187,7 +187,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
   // `Date.now()` alone would hand them all the same id.
   const addItemsToBill = (entries) => {
     const ts = Date.now();
-    const newItems = entries.map(({ product, serial }, i) => ({
+    const newItems = entries.map(({ product, serial, source, remarks }, i) => ({
       id: `${product.id}-${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
       productId: product.id,
       barcode: product.barcode,
@@ -198,7 +198,11 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
       unit: product.unit || 'Box',
       imei: serial,
       locationId: myStoreId,
-      locationName: myStoreName
+      locationName: myStoreName,
+      // Provenance rides on the item so registerSerialsFromInvoice can write it onto the unit's
+      // permanent warranty record — including any operator override that made the row importable.
+      ...(source ? { source } : {}),
+      ...(remarks ? { remarks } : {})
     }));
     setItems((prev) => [...newItems, ...prev]);
     audioService.playBeep();

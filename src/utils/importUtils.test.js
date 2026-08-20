@@ -12,7 +12,7 @@ vi.mock('../services/storage', () => ({
 }));
 
 const { storageService } = await import('../services/storage');
-const { importCustomers, importProducts, columnValueCounts, planSerialImport, PROBLEM_KINDS, isResolvable, isWarning } = await import('./importUtils');
+const { importCustomers, importProducts, columnValueCounts, planSerialImport, PROBLEM_KINDS, isResolvable, isWarning, RESOLUTIONS, describeImportedUnit } = await import('./importUtils');
 
 beforeEach(() => { vi.clearAllMocks(); });
 
@@ -314,5 +314,47 @@ describe('planSerialImport recovery', () => {
       expect(typeof p.reason).toBe('string');
       expect(p.reason.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// Every way around the normal path has to leave a trace: the operator's override is written onto
+// the unit's permanent warranty record, not just shown once on screen.
+describe('describeImportedUnit', () => {
+  const base = { fileName: 'SERIAL IMPORT.xlsx', code: 'NX.BSREM.00C', productName: 'Acer TravelMate', operator: 'Nadeem Khan' };
+
+  it('records a plain import with no override', () => {
+    const s = describeImportedUnit({ ...base, resolution: RESOLUTIONS.MATCHED });
+    expect(s).toBe('Imported from "SERIAL IMPORT.xlsx"');
+  });
+
+  it('names the operator who mapped an unmatched code', () => {
+    const s = describeImportedUnit({ ...base, resolution: RESOLUTIONS.MAPPED });
+    expect(s).toMatch(/mapped to this product by Nadeem Khan/);
+    expect(s).toMatch(/NX\.BSREM\.00C/);
+  });
+
+  it('records a product created mid-import', () => {
+    const s = describeImportedUnit({ ...base, resolution: RESOLUTIONS.CREATED });
+    expect(s).toMatch(/product created during import by Nadeem Khan/);
+  });
+
+  it('records a waived format warning alongside the override', () => {
+    const s = describeImportedUnit({ ...base, resolution: RESOLUTIONS.MAPPED, warned: true });
+    expect(s).toMatch(/mapped to this product/);
+    expect(s).toMatch(/despite a format warning/);
+  });
+
+  // The registry record is a Firestore doc — an absurd file name must not bloat it.
+  it('stays bounded no matter how long the inputs are', () => {
+    const s = describeImportedUnit({
+      fileName: 'x'.repeat(500), code: 'y'.repeat(500),
+      resolution: RESOLUTIONS.MAPPED, operator: 'z'.repeat(200), warned: true
+    });
+    expect(s.length).toBeLessThanOrEqual(300);
+  });
+
+  it('falls back gracefully when the operator name is missing', () => {
+    const s = describeImportedUnit({ ...base, resolution: RESOLUTIONS.MAPPED, operator: '' });
+    expect(s).toMatch(/by operator/);
   });
 });

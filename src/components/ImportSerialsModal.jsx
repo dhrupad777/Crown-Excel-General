@@ -11,9 +11,11 @@ import {
   planSerialImport,
   buildSerialProblemRows,
   normalizeProductCode,
+  describeImportedUnit,
   isResolvable,
   isWarning,
   PROBLEM_KINDS,
+  RESOLUTIONS,
   VALID_CATEGORIES,
   PRODUCT_CODE_ALIASES,
   SERIAL_ALIASES,
@@ -53,6 +55,13 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
   const [creatingFor, setCreatingFor] = useState('');
   const [createForm, setCreateForm] = useState({ name: '', category: 'Laptops' });
   const [createBusy, setCreateBusy] = useState(false);
+  // Codes whose product the operator CREATED here (vs pointed at an existing one) — tracked so the
+  // provenance written onto each unit says which of the two happened.
+  const [createdCodes, setCreatedCodes] = useState([]);
+
+  // Final acknowledgement gate, shown only when the import relies on operator overrides.
+  const [confirming, setConfirming] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
 
   // Registry / past-sale verdict per normalized serial: string reason = blocked, null = clean.
   const [serialChecks, setSerialChecks] = useState(() => new Map());
@@ -83,6 +92,9 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     setAcceptWarnings(false);
     setCreatingFor('');
     setCreateBusy(false);
+    setCreatedCodes([]);
+    setConfirming(false);
+    setAcknowledged(false);
     setSerialChecks(new Map());
     checkingRef.current = false;
     setChecking(false);
@@ -276,6 +288,7 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
       if (!saved) throw new Error('Could not save locally (device storage may be full).');
       refreshProducts();
       setOverride(group.key, saved);
+      setCreatedCodes((prev) => (prev.includes(group.key) ? prev : [...prev, group.key]));
       setCreatingFor('');
     } catch (err) {
       alert(`Could not create that product:\n\n${err.message}\n\nNothing was imported.`);
@@ -296,10 +309,97 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
     });
   };
 
+  // Which rows the heuristics complained about, regardless of whether the operator waved them
+  // through — needed so a waived row's provenance says so on the permanent record.
+  const warnedRows = useMemo(() => {
+    if (!acceptWarnings || !rows || !codeColumn || !serialColumn) return new Set();
+    const strict = planSerialImport({
+      rows, codeColumn, serialColumn, products, existingSerials: billSerials, codeOverrides, acceptWarnings: false
+    });
+    return new Set(strict.problems.filter((p) => isWarning(p.kind)).map((p) => p.rowNumber));
+  }, [acceptWarnings, rows, codeColumn, serialColumn, products, billSerials, codeOverrides]);
+
+  const resolutionFor = useCallback((code) => {
+    const key = normalizeProductCode(code);
+    if (!codeOverrides[key] || codeOverrides[key] === 'skip') return RESOLUTIONS.MATCHED;
+    return createdCodes.includes(key) ? RESOLUTIONS.CREATED : RESOLUTIONS.MAPPED;
+  }, [codeOverrides, createdCodes]);
+
+  // Everything the operator decided, spelled out. Drives both the acknowledgement screen and the
+  // audit-log entry, so what they were shown is exactly what gets recorded.
+  const overrides = useMemo(() => {
+    const list = [];
+    for (const [key, value] of Object.entries(codeOverrides)) {
+      const rowsForCode = plan.ready.filter((e) => normalizeProductCode(e.code) === key).length;
+      const skippedForCode = plan.skippedByOperator.filter((e) => normalizeProductCode(e.code) === key).length;
+      if (value === 'skip') {
+        if (skippedForCode > 0) list.push({ key, kind: 'skip', rows: skippedForCode });
+      } else if (rowsForCode > 0) {
+        list.push({
+          key,
+          kind: createdCodes.includes(key) ? RESOLUTIONS.CREATED : RESOLUTIONS.MAPPED,
+          rows: rowsForCode,
+          productName: value.name,
+          productId: value.id
+        });
+      }
+    }
+    return list.sort((a, b) => b.rows - a.rows);
+  }, [codeOverrides, createdCodes, plan.ready, plan.skippedByOperator]);
+
+  const waivedCount = useMemo(
+    () => readyNow.filter((e) => warnedRows.has(e.rowNumber)).length,
+    [readyNow, warnedRows]
+  );
+
+  // A clean import goes straight through; one leaning on overrides has to be acknowledged first.
+  const needsAcknowledgement = overrides.length > 0 || waivedCount > 0;
+
+  const buildEntries = () => readyNow.map((e) => {
+    const resolution = resolutionFor(e.code);
+    const warned = warnedRows.has(e.rowNumber);
+    return {
+      product: e.product,
+      serial: e.serial,
+      source: 'import',
+      remarks: describeImportedUnit({
+        fileName,
+        code: e.code,
+        resolution,
+        productName: e.product.name,
+        warned,
+        operator: storageService.getCurrentUser()?.displayName || ''
+      })
+    };
+  });
+
+  const handleAdd = () => {
+    if (readyNow.length === 0) return;
+    const entries = buildEntries();
+    // Recorded BEFORE handing the units over, so the trail exists even if the operator then
+    // abandons the bill. Fire-and-forget, like every other appendAudit call.
+    storageService.appendAudit('serials.import', null, {
+      file: fileName,
+      rowsInFile: rows?.length || 0,
+      added: entries.length,
+      blocked: blocked.length,
+      skipped: plan.problems.length - overrides.filter((o) => o.kind === 'skip').length,
+      skippedByChoice: plan.skippedByOperator.length,
+      warningsWaived: waivedCount,
+      overrides: overrides.map((o) => ({
+        code: o.key, action: o.kind, rows: o.rows, product: o.productName || '', productId: o.productId || ''
+      })),
+      blockedSerials: blocked.slice(0, 50).map((b) => ({ serial: b.serial, reason: b.reason }))
+    }, { entity: 'import', entityId: fileName || 'serial-import' });
+
+    onAdd(entries);
+    handleClose();
+  };
+
   const handleConfirm = () => {
     if (readyNow.length === 0) return;
-    onAdd(readyNow.map(({ product, serial }) => ({ product, serial })));
-    handleClose();
+    if (needsAcknowledgement && !confirming) { setConfirming(true); return; }
+    handleAdd();
   };
 
   const byProduct = useMemo(() => {
@@ -437,8 +537,92 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
           </>
         )}
 
+        {/* Step 4: acknowledgement — only when the import leans on operator overrides. A clean
+            import never sees this screen. */}
+        {rows && reviewing && confirming && (
+          <div className="space-y-4">
+            <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-4 space-y-1">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                <h4 className="font-heading font-black text-sm text-amber-900">Check this before you add</h4>
+              </div>
+              <p className="text-[11px] font-semibold text-amber-800">
+                This import relies on decisions you made rather than on codes the catalog matched by itself.
+                Each one is written onto the unit's permanent warranty record and into the admin audit trail.
+              </p>
+            </div>
+
+            <div className="border-2 border-slate-200 rounded-xl bg-white divide-y divide-slate-100">
+              {overrides.map((o) => (
+                <div key={o.key} className="p-3.5 space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono font-black text-sm text-slate-900">{o.key}</span>
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border bg-slate-50 border-slate-200 text-slate-600">
+                      {o.rows} row{o.rows === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  {o.kind === 'skip' ? (
+                    <p className="text-[11px] font-bold text-slate-500">Skipped — these rows will NOT be added.</p>
+                  ) : (
+                    <p className="text-[11px] font-bold text-slate-700">
+                      Will be billed as <span className="text-[#2563eb]">{o.productName}</span>
+                      <span className="font-semibold text-slate-500">
+                        {o.kind === RESOLUTIONS.CREATED
+                          ? ' — a product you created during this import'
+                          : ' — you mapped this code manually; the catalog did not match it'}
+                      </span>
+                    </p>
+                  )}
+                </div>
+              ))}
+              {waivedCount > 0 && (
+                <div className="p-3.5">
+                  <p className="text-[11px] font-bold text-slate-700">
+                    {waivedCount} serial{waivedCount === 1 ? '' : 's'} imported despite a format warning
+                    <span className="font-semibold text-slate-500"> — they go in exactly as they appear in the sheet.</span>
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-3.5 text-center">
+              <div className="font-heading font-black text-2xl font-mono text-emerald-600">{readyNow.length}</div>
+              <div className="text-[10px] font-black uppercase tracking-wider text-slate-600">units will be added to this bill</div>
+            </div>
+
+            <label className="flex items-start gap-2.5 text-xs font-bold text-slate-800 cursor-pointer bg-white border-2 border-slate-300 rounded-xl p-3.5">
+              <input
+                type="checkbox"
+                checked={acknowledged}
+                onChange={(e) => setAcknowledged(e.target.checked)}
+                className="accent-[#2563eb] mt-0.5"
+              />
+              <span>I have checked the products above are correct for these serials.</span>
+            </label>
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={() => { setConfirming(false); setAcknowledged(false); }}
+                className="btn btn-outline flex-1 py-2.5 text-xs font-bold"
+              >
+                Go Back &amp; Change
+              </button>
+              <button
+                type="button"
+                onClick={handleAdd}
+                disabled={!acknowledged}
+                className="btn btn-primary flex-[2] py-2.5 text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-60"
+              >
+                <PackagePlus className="w-4 h-4" />
+                Confirm &amp; Add {readyNow.length} Unit{readyNow.length === 1 ? '' : 's'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Step 3: review, resolve, confirm */}
-        {rows && reviewing && (
+        {rows && reviewing && !confirming && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3 text-center">
               <div className="rounded-xl border-2 p-3 text-emerald-600 border-emerald-200 bg-emerald-50">
@@ -680,7 +864,9 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
                   ? 'Checking…'
                   : readyNow.length === 0
                     ? 'Nothing to add yet'
-                    : `Add ${readyNow.length} Unit${readyNow.length === 1 ? '' : 's'} to Bill`}
+                    : needsAcknowledgement
+                      ? `Review & Add ${readyNow.length} Unit${readyNow.length === 1 ? '' : 's'}`
+                      : `Add ${readyNow.length} Unit${readyNow.length === 1 ? '' : 's'} to Bill`}
               </button>
             </div>
           </div>

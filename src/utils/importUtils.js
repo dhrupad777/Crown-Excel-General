@@ -475,6 +475,31 @@ export const planSerialImport = ({
 export const buildSerialProblemRows = (problems) =>
   problems.map((p) => [p.rowNumber, p.code, p.raw ?? p.serial, p.reason]);
 
+// How a row got to be importable. Anything other than MATCHED is an operator override, and every
+// one of them is written onto the unit's permanent registry record (via the item's `remarks`) and
+// into the audit log — so months later it's clear why a serial is filed under a given product.
+export const RESOLUTIONS = {
+  MATCHED: 'matched',   // the catalog resolved the code on its own
+  MAPPED: 'mapped',     // operator pointed the code at an existing product
+  CREATED: 'created'    // operator created the product during the import
+};
+
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// Human-readable provenance for one imported unit, stored on the serial's `remarks` field (which
+// searchSerials already indexes, so "imported" or a file name finds them later).
+export const describeImportedUnit = ({ fileName, code, resolution, productName, warned, operator }) => {
+  const parts = [`Imported from "${clip(String(fileName || 'spreadsheet'), 80)}"`];
+  if (resolution === RESOLUTIONS.MAPPED) {
+    parts.push(`sheet code "${clip(String(code), 40)}" mapped to this product by ${operator || 'operator'}`);
+  } else if (resolution === RESOLUTIONS.CREATED) {
+    parts.push(`product created during import by ${operator || 'operator'} for sheet code "${clip(String(code), 40)}"`);
+  }
+  if (warned) parts.push('serial imported despite a format warning');
+  void productName;
+  return clip(parts.join(' — '), 300);
+};
+
 // How many usable values each column holds. The serial check uses this to pre-select the right
 // column: a reconciliation sheet often pairs a full list against a VLOOKUP column that is only
 // partly filled, and the fullest column is the one actually worth checking.
