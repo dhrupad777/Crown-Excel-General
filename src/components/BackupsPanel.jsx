@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Archive, FileDown, Trash2, Plus, Loader2, CalendarClock } from 'lucide-react';
+import { Archive, FileDown, FileSpreadsheet, Trash2, Plus, Loader2, CalendarClock } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { downloadBundle } from '../utils/backup';
 
 // In-app backup history. Snapshots are generated automatically (weekly) and on demand, kept on this
-// device, and downloaded as JSON/XML whenever the admin likes — no forced downloads.
+// device, and downloaded as Excel/JSON/XML whenever the admin likes — no forced downloads.
 const fmtBytes = (n) => {
   if (!n) return '0 KB';
   if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
@@ -45,7 +45,7 @@ export const BackupsPanel = () => {
     try {
       const bundle = await storageService.getBackupSnapshotBundle(snap.id);
       if (!bundle) { alert('This backup could not be read from the device.'); }
-      else downloadBundle(bundle, [fmt], new Date(snap.createdAt).toISOString().slice(0, 10));
+      else await downloadBundle(bundle, [fmt], new Date(snap.createdAt).toISOString().slice(0, 10));
     } catch (e) {
       alert(`Download failed: ${e.message}`);
     }
@@ -76,7 +76,7 @@ export const BackupsPanel = () => {
           <div>
             <h3 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">Backups</h3>
             <p className="text-[11px] font-semibold text-slate-500 mt-0.5">
-              Full snapshots (products, partners, invoices, serials, staff, stores) kept on this device. Download any as JSON or XML.
+              Full snapshots (products, partners, invoices, serials, staff, stores) kept on this device. Download as Excel to read, or JSON to restore.
             </p>
           </div>
         </div>
@@ -105,6 +105,14 @@ export const BackupsPanel = () => {
                   <div className="text-[11px] font-semibold text-slate-500 truncate">{countLine(snap.counts)} · {fmtBytes(snap.size)}</div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={() => download(snap, 'xlsx')}
+                    disabled={downloading === snap.id + 'xlsx'}
+                    title="Readable workbook — one sheet per record type. Use JSON to restore."
+                    className="btn btn-outline text-[11px] py-1.5 px-3 font-bold flex items-center gap-1.5 disabled:opacity-60"
+                  >
+                    {downloading === snap.id + 'xlsx' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />} Excel
+                  </button>
                   <button
                     onClick={() => download(snap, 'json')}
                     disabled={downloading === snap.id + 'json'}
