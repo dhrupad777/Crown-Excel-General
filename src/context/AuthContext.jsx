@@ -20,6 +20,10 @@ export function AuthProvider({ children }) {
     const unsubscribe = authService.onChange(async (user) => {
       if (!user) {
         storageService.stopCloudSync();
+        // Shared terminals: the local mirror holds partner contacts, every invoice and the staff
+        // roster. Leaving it behind lets the next person read the previous user's region straight
+        // out of localStorage without signing in. Unconfirmed writes are kept (see clearLocalMirror).
+        storageService.clearLocalMirror();
         if (!cancelled) setState({ status: 'signedOut', user: null, staff: null });
         return;
       }

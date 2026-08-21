@@ -396,3 +396,63 @@ describe('registerSerialsFromInvoice — completeness', () => {
     storageService._serialsCache = [];
   });
 });
+
+// Security: the local mirror is a cache of the cloud, and these terminals are shared between staff
+// and between regions. Anything left in localStorage after sign-out is readable from devtools by
+// the next person, without signing in at all.
+describe('clearLocalMirror — shared-terminal data exposure', () => {
+  const seed = () => {
+    localStorage.setItem('crown_excel_products_v2', JSON.stringify([{ id: 'p', teamId: 'Dubai' }]));
+    localStorage.setItem('crown_excel_customers_v2', JSON.stringify([{ id: 'c', company: 'ACME', whatsapp: '+971' }]));
+    localStorage.setItem('crown_excel_invoices_v2', JSON.stringify([{ id: 'i', teamId: 'Dubai' }]));
+    localStorage.setItem('crown_excel_staff_v2', JSON.stringify([{ email: 'a@b.com' }]));
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai' }]));
+    localStorage.setItem('crown_excel_pending_writes_v2', JSON.stringify([{ id: 'x' }]));
+    localStorage.setItem('crown_excel_device_id_v2', 'dev-1');
+  };
+
+  it('drops every business collection, partner contacts and the staff roster', () => {
+    seed();
+    storageService.clearLocalMirror();
+    for (const k of ['products', 'customers', 'invoices', 'staff']) {
+      expect(localStorage.getItem('crown_excel_' + k + '_v2')).toBeNull();
+    }
+    // Locations are deliberately kept — team resolution depends on them (see clearLocalMirror).
+    expect(localStorage.getItem('crown_excel_locations_v2')).not.toBeNull();
+  });
+
+  // Data-safety invariant: a write the cloud has not confirmed must survive sign-out, or the bill
+  // it represents is gone for good.
+  it('KEEPS unconfirmed pending writes and the device id', () => {
+    seed();
+    storageService.clearLocalMirror();
+    expect(localStorage.getItem('crown_excel_pending_writes_v2')).not.toBeNull();
+    expect(localStorage.getItem('crown_excel_device_id_v2')).toBe('dev-1');
+  });
+
+  it('leaves the app reading empty rather than throwing', () => {
+    seed();
+    storageService.clearLocalMirror();
+    expect(storageService.getProducts()).toEqual([]);
+    expect(storageService.getInvoices()).toEqual([]);
+  });
+});
+
+// A team reassignment mid-session used to null the current user before re-subscribing, so the new
+// subscription resolved team '' — an unfiltered query the rules deny — and sync silently died.
+describe('team reassignment re-scopes sync instead of breaking it', () => {
+  it('keeps the identity across the restart and re-subscribes to the NEW team', () => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([
+      { id: 'loc-1', team: 'Dubai', active: true },
+      { id: 'loc-9', team: 'Nigeria', active: true }
+    ]));
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
+    storageService._syncStarted = true;   // pretend sync is live
+
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-9' });
+
+    expect(storageService.getCurrentUser()).not.toBeNull();
+    expect(storageService.getCurrentTeamId()).toBe('Nigeria');
+    storageService._syncStarted = false;
+  });
+});

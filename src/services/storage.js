@@ -63,7 +63,15 @@ class StorageService {
     const teamChanged = (prev?.locationId || '') !== (this._currentUser?.locationId || '')
       || (prev?.role || '') !== (this._currentUser?.role || '');
     if (this._syncStarted && teamChanged && this._currentUser) {
+      // stopCloudSync() clears _currentUser, and initCloudSync() derives the subscription's team
+      // from it — so without restoring it first, the re-scope resolved team '' and issued an
+      // UNFILTERED query that firestore.rules deny, silently killing sync for that user.
+      const me = this._currentUser;
       this.stopCloudSync();
+      // The mirror still holds the PREVIOUS team's records; drop it so nothing leaks across the
+      // reassignment. The new subscription repopulates it, scoped to the new team.
+      this.clearLocalMirror();
+      this._currentUser = me;
       this.initCloudSync();
     }
   }
@@ -216,6 +224,32 @@ class StorageService {
     this._syncStarted = false;
     this._serialsCache = [];
     this._currentUser = null;
+  }
+
+  // Signing out must not leave the region's data readable on the device. These terminals are
+  // shared between staff (and between REGIONS on a manager's machine), and the mirror holds
+  // partner contact details, every invoice, and the staff roster — all of it sitting in
+  // localStorage where the next person can read it from devtools without signing in at all.
+  //
+  // The mirror is only ever a cache of the cloud, so dropping it costs nothing: the next login
+  // re-syncs it, correctly scoped to THAT user's team.
+  //
+  // Deliberately NOT cleared: PENDING and ISSUES (writes the cloud has not confirmed yet — those
+  // must outlive a sign-out or an unsynced bill is lost), the device id, and backup bookkeeping.
+  clearLocalMirror() {
+    for (const key of [
+      STORAGE_KEYS.PRODUCTS,
+      STORAGE_KEYS.CUSTOMERS,
+      STORAGE_KEYS.INVOICES,
+      STORAGE_KEYS.STAFF
+      // NOT locations: _currentTeamId() resolves the caller's region THROUGH the location list, and
+      // login does not re-fetch it before subscribing. Clearing it here would leave the next sign-in
+      // with team '' — an unfiltered query the rules deny — silently killing sync. Locations hold
+      // only store names/regions, no customer or sale data.
+    ]) {
+      try { localStorage.removeItem(key); } catch { /* private mode / quota — nothing to remove */ }
+    }
+    window.dispatchEvent(new CustomEvent("crown-data-change", { detail: { type: "all" } }));
   }
 
   // Raw list read INCLUDING soft-deleted (archived) records. Used by every mutation so that
