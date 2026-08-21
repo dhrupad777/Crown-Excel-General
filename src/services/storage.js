@@ -142,6 +142,21 @@ class StorageService {
     return this.getLocations().find(l => l.id === locId)?.team || '';
   }
 
+  // The caller's team is resolved THROUGH the location list, so on a device that has never synced
+  // (a brand-new shop terminal, or the first login after a sign-out cleared the mirror) the list is
+  // empty and _currentTeamId() returns ''. initCloudSync would then subscribe with no team filter —
+  // a query firestore.rules deny for non-admins — and sync would sit dead until a manual reload.
+  // Fetching the list once, before subscribing, closes that window. Cheap: locations is a handful
+  // of documents, and it's skipped entirely when the mirror already has them.
+  async ensureLocationsLoaded() {
+    if (this.getLocations().length > 0) return true;
+    const locations = await firebaseService.fetchCollectionOnce('locations');
+    if (!locations || locations.length === 0) return false;
+    this._setItem(STORAGE_KEYS.LOCATIONS, locations);
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'locations' } }));
+    return true;
+  }
+
   // Public accessor for the UI (e.g. the Billing Desk stamps the bill's team).
   getCurrentTeamId() {
     return this._currentTeamId();

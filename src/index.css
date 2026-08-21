@@ -1,5 +1,17 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800;900&display=swap');
 
+/* Tailwind is compiled at BUILD time (tailwind.config.js + postcss.config.js). It used to be
+   generated in the browser by the cdn.tailwindcss.com Play script, which meant a third party
+   executed code inside the app on every load and a real CSP was impossible (that script needs
+   'unsafe-eval'). Nothing about the classes themselves changed.
+
+   ORDER MATTERS: `utilities` is emitted at the BOTTOM of this file, after the component classes
+   below. The Play CDN injected its stylesheet at runtime, so utilities out-ranked everything in
+   here on equal specificity - e.g. a `py-3` on an element that also has `.btn`. Emitting them
+   last reproduces exactly that, so no button or field shifts. */
+@tailwind base;
+@tailwind components;
+
 :root {
   /* Crown Excel General Blue - Stitch Elegant Minimalist (70% White & Royal Blue #2563eb) Palette */
   --bg-primary: #f7f9fb;
@@ -447,3 +459,6 @@ h1, h2, h3, h4, h5, h6 {
   color: #94a3b8;
   text-align: center;
 }
+
+/* Utilities last - see the note at the top of this file. */
+@tailwind utilities;

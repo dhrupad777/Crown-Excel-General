@@ -173,15 +173,21 @@ service cloud.firestore {
         // Identity + original biller stay immutable, items may only GROW, and a standard user can
         // only ever leave the status at 'draft' or set it to 'final' (never 'cancelled'). Blocked
         // once the draft has expired (admins bypass above).
+        // Only an OPEN DRAFT may be extended. A finalized sale is closed: previously this branch
+        // let a standard user append units to a bill that was already final, and even flip its
+        // status back to 'draft' (the status test allowed both values in either direction). No
+        // client flow does either — drafts only ever move draft -> final — so this costs nothing
+        // and shuts both off. `registrySummary` is dropped from the writable set: nothing writes it.
         || (ownTeam()
+            && resource.data.status == 'draft'
             && !draftExpiredForStaff()
             && request.resource.data.teamId == resource.data.teamId
             && request.resource.data.invoiceNo == resource.data.invoiceNo
             && request.resource.data.billedBy == resource.data.billedBy
             && request.resource.data.items.size() >= resource.data.items.size()
-            && (!('status' in request.resource.data) || request.resource.data.status in ['draft', 'final'])
+            && request.resource.data.status in ['draft', 'final']
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['items', 'status', 'draftExpiresAt', 'registrySummary', 'updatedAt',
+                 .hasOnly(['items', 'status', 'draftExpiresAt', 'updatedAt',
                            'appendedBy', 'appendedByName', 'finalizedBy', 'finalizedByName', 'finalizedAt']));
     }
 

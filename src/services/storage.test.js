@@ -456,3 +456,26 @@ describe('team reassignment re-scopes sync instead of breaking it', () => {
     storageService._syncStarted = false;
   });
 });
+
+// A brand-new shop terminal has no cached locations, so the caller's region resolves to '' and the
+// team-scoped subscription becomes an unfiltered query the rules deny. Login now loads them first.
+describe('ensureLocationsLoaded - fresh terminal', () => {
+  it('fetches the location list when the device has never synced', async () => {
+    firebaseService.fetchCollectionOnce = vi.fn(async () => [{ id: 'loc-1', team: 'Dubai', active: true }]);
+    expect(storageService.getLocations()).toHaveLength(0);
+
+    const ok = await storageService.ensureLocationsLoaded();
+
+    expect(ok).toBe(true);
+    expect(firebaseService.fetchCollectionOnce).toHaveBeenCalledWith('locations');
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
+    expect(storageService.getCurrentTeamId()).toBe('Dubai'); // would be '' before the fetch
+  });
+
+  it('does not hit the network when the list is already cached', async () => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai' }]));
+    firebaseService.fetchCollectionOnce = vi.fn(async () => []);
+    expect(await storageService.ensureLocationsLoaded()).toBe(true);
+    expect(firebaseService.fetchCollectionOnce).not.toHaveBeenCalled();
+  });
+});

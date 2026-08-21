@@ -53,6 +53,10 @@ export function AuthProvider({ children }) {
           role: result.staff.role,
           locationId: result.staff.locationId
         });
+        // Locations resolve this user's region, and initCloudSync subscribes with it — so they have
+        // to be in place BEFORE it runs or a fresh terminal syncs nothing (see ensureLocationsLoaded).
+        await storageService.ensureLocationsLoaded();
+        if (cancelled) return;
         storageService.initCloudSync();
         setState({ status: 'ready', user, staff: result.staff });
       } else {
