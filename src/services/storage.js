@@ -170,7 +170,7 @@ class StorageService {
   }
 
   // Does the signed-in operator hold this data permission? Admins hold all of them implicitly.
-  // See DATA_PERMISSIONS in appConfig for what each one gates (downloads + analytics only).
+  // See DATA_CATEGORIES in appConfig: each category has a view key (the tab) and a download key.
   can(key) {
     if (this._isAdmin()) return true;
     return this._currentUser?.permissions?.[key] === true;

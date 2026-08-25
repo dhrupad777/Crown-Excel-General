@@ -22,18 +22,27 @@ import {
   Package,
   ScanLine,
   Layers,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Printer
 } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import confetti from 'canvas-confetti';
 import { Modal } from '../components/Modal';
 import { ImportSerialsModal } from '../components/ImportSerialsModal';
+import { InvoicePrintDocument } from '../components/InvoicePrintDocument';
+import { groupInvoiceItems } from '../utils/invoice';
+import { useAuth } from '../context/AuthContext';
 import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 
 export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) => {
+  const { can } = useAuth();
   const isAdmin = storageService.getCurrentUser()?.role === 'admin';
+  // Only offer the Archive link to someone who can actually open that tab. Printing below is
+  // unconditional — see the note on the success modal's buttons.
+  const canViewArchive = can('invoicesView');
   // Bill Items State
   const [items, setItems] = useState([]);
 
@@ -1307,17 +1316,30 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Printing is deliberately NOT a permission — a finished sale must always be able to
+                produce its paper. This prints the bill directly from here, so an operator whose
+                Invoices View is switched off never needs the Archive. The Archive link only shows
+                when they can actually open it. */}
+            <div className={`grid grid-cols-1 gap-3 ${canViewArchive ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
               <button
                 type="button"
-                onClick={() => {
-                  setShowSuccessModal(false);
-                  onViewInvoice(savedInvoice.id);
-                }}
+                onClick={() => window.print()}
                 className="btn btn-outline font-bold w-full py-3.5"
               >
-                <FileText className="w-4 h-4 text-slate-700" /> View in Archive / Print
+                <Printer className="w-4 h-4 text-slate-700" /> Print Invoice
               </button>
+              {canViewArchive && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSuccessModal(false);
+                    onViewInvoice(savedInvoice.id);
+                  }}
+                  className="btn btn-outline font-bold w-full py-3.5"
+                >
+                  <FileText className="w-4 h-4 text-slate-700" /> View in Archive
+                </button>
+              )}
               <button
                 type="button"
                 onClick={resetForNextBill}
@@ -1329,6 +1351,19 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
           </div>
         )}
       </Modal>
+
+      {/* Print-only document in a body-level portal. The print rules in index.css hide #root and
+          show only #print-root, so the bill isn't padded out by the invisible app layout. Mounted
+          only while the success modal is open, so it can never collide with the Archive's copy. */}
+      {showSuccessModal && savedInvoice && createPortal(
+        <div id="print-root">
+          <InvoicePrintDocument
+            invoice={savedInvoice}
+            groups={groupInvoiceItems(savedInvoice.items)}
+          />
+        </div>,
+        document.body
+      )}
 
     </div>
   );

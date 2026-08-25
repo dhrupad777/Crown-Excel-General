@@ -483,7 +483,8 @@ describe('ensureLocationsLoaded - fresh terminal', () => {
 // Per-staff data permissions gate downloads and analytics only. Default is nothing granted, so a
 // brand-new account can bill and look records up, but cannot take data out of the system.
 describe('data permissions - can()', () => {
-  const KEYS = ['invoicesExport', 'serialsExport', 'partnersExport', 'analytics'];
+  const KEYS = ['invoicesView', 'invoicesExport', 'serialsView', 'serialsExport',
+                'partnersView', 'partnersExport', 'analytics'];
 
   it('grants nothing to a staff doc written before permissions existed', () => {
     storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
@@ -501,12 +502,24 @@ describe('data permissions - can()', () => {
   it('grants exactly the keys an admin turned on', () => {
     storageService.setCurrentUser({
       email: 's@b.com', role: 'standard', locationId: 'loc-1',
-      permissions: { invoicesExport: true, analytics: true }
+      permissions: { invoicesView: true, invoicesExport: true, analytics: true }
     });
+    expect(storageService.can('invoicesView')).toBe(true);
     expect(storageService.can('invoicesExport')).toBe(true);
     expect(storageService.can('analytics')).toBe(true);
-    expect(storageService.can('serialsExport')).toBe(false);
-    expect(storageService.can('partnersExport')).toBe(false);
+    expect(storageService.can('serialsView')).toBe(false);
+    expect(storageService.can('partnersView')).toBe(false);
+  });
+
+  // A tab someone cannot open cannot have a working download button on it. The pair is collapsed
+  // on read as well as write, so a hand-edited doc can't produce the impossible state either.
+  it('drops a download grant whose view is switched off', () => {
+    storageService.setCurrentUser({
+      email: 's@b.com', role: 'standard', locationId: 'loc-1',
+      permissions: { invoicesView: false, invoicesExport: true, serialsView: true, serialsExport: true }
+    });
+    expect(storageService.can('invoicesExport')).toBe(false);   // view off => download off
+    expect(storageService.can('serialsExport')).toBe(true);     // view on  => download stands
   });
 
   // Anything other than a literal true is a denial - a truthy string from a hand-edited doc, or a
@@ -514,10 +527,10 @@ describe('data permissions - can()', () => {
   it('only a literal true grants, and unknown keys never do', () => {
     storageService.setCurrentUser({
       email: 's@b.com', role: 'standard', locationId: 'loc-1',
-      permissions: { invoicesExport: 'yes', serialsExport: 1, somethingElse: true }
+      permissions: { invoicesView: 'yes', serialsView: 1, somethingElse: true }
     });
-    expect(storageService.can('invoicesExport')).toBe(false);
-    expect(storageService.can('serialsExport')).toBe(false);
+    expect(storageService.can('invoicesView')).toBe(false);
+    expect(storageService.can('serialsView')).toBe(false);
     expect(storageService.can('somethingElse')).toBe(false);
   });
 
@@ -530,11 +543,11 @@ describe('data permissions - can()', () => {
     storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
     await storageService.saveStaff({
       email: 'S@B.com', displayName: 'Nadeem', role: 'standard', locationId: 'loc-1', active: true,
-      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+      permissions: { invoicesView: true, invoicesExport: true, serialsView: false, analytics: false }
     });
     const saved = storageService.getStaffByEmail('s@b.com');
     expect(saved.permissions.invoicesExport).toBe(true);
-    expect(saved.permissions.serialsExport).toBe(false);
+    expect(saved.permissions.serialsView).toBe(false);
     expect(firebaseService.updateDocStrict).toHaveBeenCalled();  // cloud-confirmed, not fire-and-forget
   });
 
@@ -557,7 +570,7 @@ describe('data permissions survive an unrelated staff edit', () => {
     storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
     await storageService.saveStaff({
       email: 's@b.com', displayName: 'Nadeem', role: 'standard', locationId: 'loc-1', active: true,
-      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+      permissions: { invoicesView: true, invoicesExport: true }
     });
     expect(storageService.getStaffByEmail('s@b.com').permissions.invoicesExport).toBe(true);
 
@@ -570,7 +583,7 @@ describe('data permissions survive an unrelated staff edit', () => {
     // ...which is why the UI passes them through. Same edit, done correctly:
     await storageService.saveStaff({
       email: 's@b.com', displayName: 'Nadeem Khan', role: 'standard', locationId: 'loc-1', active: true,
-      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+      permissions: { invoicesView: true, invoicesExport: true }
     });
     expect(storageService.getStaffByEmail('s@b.com').permissions.invoicesExport).toBe(true);
   });

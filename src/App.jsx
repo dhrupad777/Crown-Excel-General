@@ -25,6 +25,7 @@ import { storageService } from './services/storage';
 import { firebaseService } from './services/firebase';
 import { runWeeklySnapshotIfDue } from './utils/backup';
 import { useAuth } from './context/AuthContext';
+import { tabPermission } from './config/appConfig';
 
 export function App() {
   const { isAdmin, staff, can } = useAuth();
@@ -71,8 +72,12 @@ export function App() {
   // Import/Export State
   const [importText, setImportText] = useState('');
 
-  // Handle switching to view a saved invoice
+  // Handle switching to view a saved invoice. Called from the Billing Desk success modal and from
+  // the Registrations Dashboard — both of which can be reached by someone who does NOT hold the
+  // Invoices view, so this must refuse rather than drop them on a tab they can't have. The Billing
+  // Desk prints for itself, so nothing is lost by refusing here.
   const handleViewInvoice = (invoiceId) => {
+    if (!can('invoicesView')) return;
     setSelectedInvoiceId(invoiceId);
     setActiveTab('invoices');
   };
@@ -129,13 +134,13 @@ export function App() {
     }
   };
 
-  // Safety net alongside the role-aware Navbar: a non-admin can never land on the Admin tab
-  // (e.g. after being demoted mid-session while the tab is open). Same for the analytics
-  // Dashboard, whose permission an admin can revoke while the operator is sitting on it.
+  // Safety net alongside the permission-aware Navbar. An admin can revoke a tab while the operator
+  // is sitting on it (the staff onSnapshot updates the session live), so every gated tab bounces
+  // back to the Billing Desk rather than leaving them on a page they no longer hold.
+  const gatedTabKey = tabPermission(activeTab);
   if (activeTab === 'admin' && !isAdmin) {
     setActiveTab('billing');
-  }
-  if (activeTab === 'dashboard' && !can('analytics')) {
+  } else if (gatedTabKey && !can(gatedTabKey)) {
     setActiveTab('billing');
   }
 
@@ -194,19 +199,19 @@ export function App() {
         {activeTab === 'drafts' && (
           <DraftsView onContinueDraft={handleContinueDraft} />
         )}
-        {activeTab === 'invoices' && (
+        {activeTab === 'invoices' && can('invoicesView') && (
           <InvoicesArchive initialInvoiceId={selectedInvoiceId} />
         )}
         {activeTab === 'products' && (
           <ProductsManager />
         )}
-        {activeTab === 'customers' && (
+        {activeTab === 'customers' && can('partnersView') && (
           <CustomersManager />
         )}
         {activeTab === 'serials' && (
           <SerialCapture />
         )}
-        {activeTab === 'registry' && (
+        {activeTab === 'registry' && can('serialsView') && (
           <SerialRegistry />
         )}
         {activeTab === 'dashboard' && can('analytics') && (

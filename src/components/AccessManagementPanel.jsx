@@ -1,11 +1,11 @@
 import React, { useState, useMemo } from 'react';
 import { ShieldCheck, MapPin, Store, Loader2, Crown, Lock, Check, X } from 'lucide-react';
 import { storageService } from '../services/storage';
-import { DATA_PERMISSIONS, DATA_PERMISSION_KEYS, normalizePermissions } from '../config/appConfig';
+import { DATA_CATEGORIES, normalizePermissions } from '../config/appConfig';
 
-// Admin dashboard for per-staff data access: pick a region, then a store, then toggle what each
-// person there may DOWNLOAD or ANALYSE. Nothing here affects day-to-day work — billing, drafts,
-// scanning and record lookup are never gated (see DATA_PERMISSIONS).
+// Admin dashboard for per-staff data access: pick a region, then a store, then set what each
+// person there can SEE and DOWNLOAD, one row per category. Nothing here affects day-to-day work —
+// billing, drafts, scanning, products and invoice printing are never gated (see DATA_CATEGORIES).
 //
 // `regions` comes from AdminPage's existing regionRows memo so the region → store → staff shape is
 // computed once; `staffList` is the full roster.
@@ -39,18 +39,25 @@ export const AccessManagementPanel = ({ regions, staffList, onSaved }) => {
   const regionExposure = (r) => {
     const ids = new Set(r.stores.map((s) => s.id));
     const people = activeStaff.filter((s) => ids.has(s.locationId) && s.role !== 'admin');
-    const counts = Object.fromEntries(DATA_PERMISSION_KEYS.map((k) => [k, 0]));
+    // Counted on VIEW: it's the coarser signal, and download can't exist without it.
+    const counts = Object.fromEntries(DATA_CATEGORIES.map((c) => [c.key, 0]));
     for (const p of people) {
       const perms = normalizePermissions(p.permissions);
-      for (const k of DATA_PERMISSION_KEYS) if (perms[k]) counts[k] += 1;
+      for (const c of DATA_CATEGORIES) if (perms[c.view]) counts[c.key] += 1;
     }
     return { total: people.length, counts };
   };
 
-  const toggle = async (member, key) => {
+  // `next` is normalized on save, which enforces "download implies view" - so switching View off
+  // takes its Download with it. The reverse (turning Download on) is applied here, because
+  // normalize can only ever remove a grant, never add one.
+  const toggle = async (member, category, which) => {
     const email = member.email || member.id;
+    const key = which === 'view' ? category.view : category.download;
     const before = normalizePermissions(member.permissions);
-    const next = { ...before, [key]: !before[key] };
+    const draft = { ...before, [key]: !before[key] };
+    if (which === 'download' && draft[key]) draft[category.view] = true;
+    const next = normalizePermissions(draft);
     setBusy(email + key);
     setError('');
     try {
@@ -111,17 +118,17 @@ export const AccessManagementPanel = ({ regions, staffList, onSaved }) => {
                     </span>
                   </div>
                   <div className="mt-2.5 space-y-1">
-                    {DATA_PERMISSIONS.map((p) => (
-                      <div key={p.key} className="flex items-center gap-2">
-                        <span className="text-[10px] font-bold text-slate-500 w-16 flex-shrink-0">{p.label}</span>
+                    {DATA_CATEGORIES.map((c) => (
+                      <div key={c.key} className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold text-slate-500 w-16 flex-shrink-0">{c.label}</span>
                         <div className="flex-1 h-1.5 rounded-full bg-slate-200 overflow-hidden">
                           <div
-                            className={counts[p.key] > 0 ? 'h-full bg-[#2563eb]' : 'h-full bg-slate-200'}
-                            style={{ width: total ? `${(counts[p.key] / total) * 100}%` : '0%' }}
+                            className={counts[c.key] > 0 ? 'h-full bg-[#2563eb]' : 'h-full bg-slate-200'}
+                            style={{ width: total ? `${(counts[c.key] / total) * 100}%` : '0%' }}
                           />
                         </div>
                         <span className="text-[10px] font-mono font-black text-slate-600 w-8 text-right">
-                          {counts[p.key]}/{total}
+                          {counts[c.key]}/{total}
                         </span>
                       </div>
                     ))}
@@ -198,35 +205,59 @@ export const AccessManagementPanel = ({ regions, staffList, onSaved }) => {
                         Admins hold every permission. Change the role in the Staff table above to restrict this person.
                       </p>
                     ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {DATA_PERMISSIONS.map((p) => {
-                          const on = perms[p.key];
-                          const saving = busy === email + p.key;
+                      // One row per category: See it, and Download it. Turning See off takes
+                      // Download with it (normalizePermissions), so the pair can never disagree.
+                      <div className="space-y-1.5">
+                        <div className="hidden sm:flex items-center gap-2 px-1">
+                          <span className="flex-1" />
+                          <span className="w-[104px] text-[9px] font-black uppercase tracking-wider text-slate-400 text-center">See</span>
+                          <span className="w-[104px] text-[9px] font-black uppercase tracking-wider text-slate-400 text-center">Download</span>
+                        </div>
+                        {DATA_CATEGORIES.map((c) => {
+                          // A plain render function, not a nested component: declaring a component
+                          // inside the loop would remount it on every render.
+                          const renderSwitch = ({ which, on, hint, disabled }) => {
+                            const key = which === 'view' ? c.view : c.download;
+                            const saving = busy === email + key;
+                            return (
+                              <button
+                                key={which}
+                                type="button"
+                                onClick={() => toggle(member, c, which)}
+                                disabled={saving || disabled}
+                                title={disabled ? 'Nothing to download for this one' : hint}
+                                className={`w-full sm:w-[104px] flex items-center justify-between gap-2 border-2 rounded-lg px-2 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-default ${
+                                  on ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-slate-50 hover:border-slate-300'
+                                }`}
+                              >
+                                <span className={`sm:hidden text-[10px] font-black ${on ? 'text-emerald-800' : 'text-slate-500'}`}>
+                                  {which === 'view' ? 'See' : 'Download'}
+                                </span>
+                                <span className="hidden sm:block flex-1" />
+                                <span className={`flex-shrink-0 w-9 h-5 rounded-full flex items-center px-0.5 ${on ? 'bg-emerald-500 justify-end' : 'bg-slate-300 justify-start'}`}>
+                                  <span className="w-4 h-4 rounded-full bg-white flex items-center justify-center shadow">
+                                    {saving
+                                      ? <Loader2 className="w-2.5 h-2.5 animate-spin text-slate-500" />
+                                      : on ? <Check className="w-2.5 h-2.5 text-emerald-600" /> : <X className="w-2.5 h-2.5 text-slate-400" />}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          };
                           return (
-                            <button
-                              key={p.key}
-                              type="button"
-                              onClick={() => toggle(member, p.key)}
-                              disabled={saving}
-                              title={p.hint}
-                              className={`flex items-center justify-between gap-2 border-2 rounded-xl px-3 py-2 text-left transition-colors disabled:opacity-60 ${
-                                on ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-slate-50 hover:border-slate-300'
-                              }`}
-                            >
-                              <span className="min-w-0">
-                                <span className={`block text-[11px] font-black ${on ? 'text-emerald-800' : 'text-slate-600'}`}>
-                                  {p.label}
-                                </span>
-                                <span className="block text-[10px] font-semibold text-slate-500 truncate">{p.hint}</span>
+                            <div key={c.key} className="flex flex-col sm:flex-row sm:items-center gap-1.5 border-2 border-slate-100 rounded-xl p-2">
+                              <span className="flex-1 min-w-0">
+                                <span className="block text-[11px] font-black text-slate-700">{c.label}</span>
+                                <span className="block text-[10px] font-semibold text-slate-500 truncate">{c.viewHint}</span>
                               </span>
-                              <span className={`flex-shrink-0 w-11 h-6 rounded-full flex items-center px-0.5 ${on ? 'bg-emerald-500 justify-end' : 'bg-slate-300 justify-start'}`}>
-                                <span className="w-5 h-5 rounded-full bg-white flex items-center justify-center shadow">
-                                  {saving
-                                    ? <Loader2 className="w-3 h-3 animate-spin text-slate-500" />
-                                    : on ? <Check className="w-3 h-3 text-emerald-600" /> : <X className="w-3 h-3 text-slate-400" />}
-                                </span>
-                              </span>
-                            </button>
+                              {renderSwitch({ which: 'view', on: perms[c.view], hint: c.viewHint })}
+                              {renderSwitch({
+                                which: 'download',
+                                on: c.download ? perms[c.download] : false,
+                                hint: c.downloadHint,
+                                disabled: !c.download
+                              })}
+                            </div>
                           );
                         })}
                       </div>

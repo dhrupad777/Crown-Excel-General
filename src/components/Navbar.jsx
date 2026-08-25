@@ -22,6 +22,7 @@ import {
 import { audioService } from '../services/audio';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
+import { tabPermission } from '../config/appConfig';
 
 export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
   const { user, isAdmin, can, signOut } = useAuth();
@@ -78,28 +79,33 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     if (newState) audioService.playBeep();
   };
 
+  // A tab that a data category governs is shown only when the operator holds its VIEW permission
+  // (Admin → Data Access); admins hold everything. Tabs with no category — Billing Desk, Drafts,
+  // Products, Serial Capture — are day-to-day work and are never gated. Driven by tabPermission()
+  // so this can't drift from the declarations in appConfig.
+  const visible = (items) => items.filter((it) => {
+    const key = tabPermission(it.id);
+    return !key || can(key);
+  });
+
   const navSections = [
     {
       label: 'CORE PLATFORM',
-      items: [
+      items: visible([
         { id: 'billing', label: 'Billing Desk', icon: Receipt, badge: 'ACTIVE' },
         { id: 'drafts', label: 'Drafts', icon: FileEdit, count: stats.draftsCount, alert: stats.expiredDrafts },
         { id: 'invoices', label: 'Invoices Archive', icon: Archive, count: stats.invoicesCount },
         { id: 'products', label: 'Products & IMEIs', icon: Package, count: stats.productsCount },
         { id: 'customers', label: 'Customers CRM', icon: Users, count: stats.customersCount },
-      ]
+      ])
     },
     {
       label: 'WARRANTY REGISTRY',
-      items: [
+      items: visible([
         { id: 'serials', label: 'Serial Capture', icon: ScanLine },
         { id: 'registry', label: 'Serial Registry', icon: ShieldCheck, count: stats.serialsCount },
-        // The Dashboard is analytics, not day-to-day work — shown only to staff granted it
-        // (Admin → Data Access). Admins always see it.
-        ...(can('analytics')
-          ? [{ id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries }]
-          : []),
-      ]
+        { id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries },
+      ])
     },
     ...(isAdmin ? [{
       label: 'ADMINISTRATION',
@@ -107,7 +113,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
         { id: 'admin', label: 'Staff & Locations', icon: UserCog },
       ]
     }] : [])
-  ];
+  ].filter((section) => section.items.length > 0); // never render a heading with nothing under it
 
   // Flat list for the mobile bottom bar (labels shortened to fit)
   const mobileNavItems = navSections.flatMap((s) => s.items);

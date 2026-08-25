@@ -28,6 +28,7 @@ import { Modal } from '../components/Modal';
 import { DateRangeCalendar } from '../components/DateRangeCalendar';
 import { exportInvoicesXlsx, exportInvoicesCsv, formatLocalDate, countInvoiceUnits } from '../utils/exportUtils';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
+import { groupInvoiceItems } from '../utils/invoice';
 import { InvoicePrintDocument } from '../components/InvoicePrintDocument';
 import TeamTag from '../components/TeamTag';
 import { useAuth } from '../context/AuthContext';
@@ -134,25 +135,6 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     });
   };
 
-  // Collapses one invoice's line items into per-product groups, each carrying the running unit
-  // count and every serial in the order it was scanned — so 100 identical phones show as one
-  // row (Qty 100) with an expandable serial list instead of 100 rows.
-  const groupInvoiceItems = (items) => {
-    const groups = [];
-    const byKey = new Map();
-    (items || []).forEach((item) => {
-      const key = item.productId || item.barcode || `${item.name}|${item.sku || ''}`;
-      let g = byKey.get(key);
-      if (!g) {
-        g = { key, name: item.name, sku: item.sku || '', barcode: item.barcode || '', category: item.category || 'Electronics', qty: 0, serials: [] };
-        byKey.set(key, g);
-        groups.push(g);
-      }
-      g.qty += item.qty || 1;
-      String(item.imei || '').split(/[/,;]+/).map((s) => s.trim()).filter(Boolean).forEach((s) => g.serials.push(s));
-    });
-    return groups;
-  };
 
   // Close the calendar popover on an outside click — no dropdown elsewhere in this app needs
   // this (they close via explicit selection instead), but a calendar left open until you

@@ -41,47 +41,83 @@ export const APP_CHECK_SITE_KEY = '';
 export const DELETION_RETENTION_DAYS = 90;
 
 // --- PER-STAFF DATA PERMISSIONS ------------------------------------------------------------
-// What a staff member may take OUT of the system. Granted per person by an admin (Admin → Data
-// Access); absent means false, so a new account starts able to bill and nothing else.
+// What a staff member can SEE and what they can take OUT. Granted per person by an admin
+// (Admin → Data Access); absent means false, so a new account can bill, continue drafts, scan
+// serials and manage products — and sees nothing else.
 //
-// These gate downloads and analytics ONLY. Every record stays readable in the UI — an operator
-// still has to look up a past bill or a serial mid-sale, and adding friction there was explicitly
-// ruled out. Creating invoices, continuing drafts, scanning serials and PRINTING an invoice are
-// never gated. Admins hold every permission implicitly.
+// Each category has a VIEW key (shows the tab at all) and a DOWNLOAD key (the export buttons on
+// it). Analytics is a view with nothing to download, so its download key is null.
+//
+// NEVER gated, whatever is set here: Billing Desk, Drafts, Products & IMEIs, Serial Capture, and
+// PRINTING an invoice — a sale must always be able to produce its paper, which is why the Billing
+// Desk prints for itself rather than sending the operator to the Archive. Admins hold everything.
 //
 // Scope note: this is a UI control plus an audit trail, not a hard boundary. A staff device already
-// syncs its whole team's data because billing needs it, so hiding a button does not erase the local
+// syncs its whole team's data because billing needs it, so hiding a tab does not erase the local
 // copy. What IS server-enforced is that only an admin can change these (firestore.rules restricts
 // staff writes to admins), so nobody can grant themselves access — and every export is written to
 // the audit log, so misuse is detectable.
 //
 // Backups are deliberately absent: they stay admin-only, because one bundle holds every region.
-export const DATA_PERMISSIONS = [
+export const DATA_CATEGORIES = [
   {
-    key: 'invoicesExport',
+    key: 'invoices',
     label: 'Invoices',
-    hint: 'Download the Invoices Archive as Excel or CSV'
+    tab: 'invoices',
+    view: 'invoicesView',
+    download: 'invoicesExport',
+    viewHint: 'See the Invoices Archive',
+    downloadHint: 'Download the archive as Excel or CSV'
   },
   {
-    key: 'serialsExport',
+    key: 'serials',
     label: 'Serials',
-    hint: 'Download the Serial Registry, and use the Serial Check tool'
+    tab: 'registry',
+    view: 'serialsView',
+    download: 'serialsExport',
+    viewHint: 'See the Serial Registry',
+    downloadHint: 'Download the registry, and use the Serial Check tool'
   },
   {
-    key: 'partnersExport',
+    key: 'partners',
     label: 'Partners',
-    hint: 'Download the Customers CRM list'
+    tab: 'customers',
+    view: 'partnersView',
+    download: 'partnersExport',
+    viewHint: 'See the Customers CRM',
+    downloadHint: 'Download the partner list'
   },
   {
     key: 'analytics',
     label: 'Analytics',
-    hint: 'See the Registrations Dashboard'
+    tab: 'dashboard',
+    view: 'analytics',
+    download: null,
+    viewHint: 'See the Registrations Dashboard'
   }
 ];
 
-export const DATA_PERMISSION_KEYS = DATA_PERMISSIONS.map((p) => p.key);
+export const DATA_PERMISSION_KEYS = DATA_CATEGORIES.flatMap((c) =>
+  [c.view, c.download].filter(Boolean)
+);
 
-// Normalizes whatever is on a staff doc into a full boolean map — a doc written before this feature
-// existed has no `permissions` field at all, and must read as "nothing granted".
-export const normalizePermissions = (permissions) =>
-  Object.fromEntries(DATA_PERMISSION_KEYS.map((k) => [k, permissions?.[k] === true]));
+// Which permission key, if any, controls a given tab id. Used by the navbar and the route guards
+// so the gating can never drift from the declarations above.
+export const tabPermission = (tabId) =>
+  DATA_CATEGORIES.find((c) => c.tab === tabId)?.view || null;
+
+// Normalizes whatever is on a staff doc into a full boolean map. Two jobs:
+//
+//  1. A doc written before this feature (or before View existed) is missing keys — those must read
+//     as "not granted", never as undefined.
+//  2. INVARIANT — download implies view. A download grant with its view switched off is a state
+//     that cannot mean anything: the buttons live on a tab the person cannot open. Collapsing it
+//     here, on every read AND every write, is what keeps the stored data coherent and lets
+//     storageService.can() stay a dumb lookup.
+export const normalizePermissions = (permissions) => {
+  const out = Object.fromEntries(DATA_PERMISSION_KEYS.map((k) => [k, permissions?.[k] === true]));
+  for (const c of DATA_CATEGORIES) {
+    if (c.download && !out[c.view]) out[c.download] = false;
+  }
+  return out;
+};
