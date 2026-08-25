@@ -7,6 +7,7 @@ const AuthContext = createContext({
   user: null,
   staff: null,
   isAdmin: false,
+  can: () => false,   // deny by default — a consumer rendered outside the provider grants nothing
   signIn: async () => ({ ok: false }),
   signOut: async () => {}
 });
@@ -51,7 +52,8 @@ export function AuthProvider({ children }) {
           email: user.email,
           displayName: user.displayName || result.staff.displayName || user.email,
           role: result.staff.role,
-          locationId: result.staff.locationId
+          locationId: result.staff.locationId,
+          permissions: result.staff.permissions
         });
         // Locations resolve this user's region, and initCloudSync subscribes with it — so they have
         // to be in place BEFORE it runs or a fresh terminal syncs nothing (see ensureLocationsLoaded).
@@ -71,7 +73,9 @@ export function AuthProvider({ children }) {
   }, []);
 
   // Live role refresh: if an admin edits this operator's staff record (role change,
-  // deactivation) the staff mirror updates via onSnapshot and this keeps the session honest.
+  // deactivation, DATA PERMISSIONS) the staff mirror updates via onSnapshot and this keeps the
+  // session honest — so a grant or revoke lands on the operator's screen within seconds, without
+  // anyone having to sign out and back in.
   useEffect(() => {
     const handleStaffChange = (e) => {
       if (e.detail?.type !== 'staff') return;
@@ -86,7 +90,8 @@ export function AuthProvider({ children }) {
           email: prev.user.email,
           displayName: prev.user.displayName || me.displayName,
           role: me.role,
-          locationId: me.locationId
+          locationId: me.locationId,
+          permissions: me.permissions
         });
         return { ...prev, staff: me };
       });
@@ -98,11 +103,22 @@ export function AuthProvider({ children }) {
   const signIn = useCallback(() => authService.signInWithGoogle(), []);
   const signOut = useCallback(() => authService.signOutUser(), []);
 
+  const isAdmin = state.staff?.role === 'admin';
+
+  // Data permissions (downloads + analytics). Admins hold all of them; everyone else holds only
+  // what an admin granted. Recomputed whenever the staff record changes, so a revoke takes the
+  // buttons away live. Mirrors storageService.can() for non-React call sites.
+  const can = useCallback(
+    (key) => isAdmin || state.staff?.permissions?.[key] === true,
+    [isAdmin, state.staff]
+  );
+
   const value = {
     status: state.status,
     user: state.user,
     staff: state.staff,
-    isAdmin: state.staff?.role === 'admin',
+    isAdmin,
+    can,
     signIn,
     signOut
   };

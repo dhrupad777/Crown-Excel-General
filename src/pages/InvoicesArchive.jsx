@@ -20,7 +20,8 @@ import {
   User,
   Edit3,
   Pencil,
-  ArrowDownUp
+  ArrowDownUp,
+  Lock
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
@@ -33,7 +34,8 @@ import { useAuth } from '../context/AuthContext';
 import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 
 export const InvoicesArchive = ({ initialInvoiceId }) => {
-  const { isAdmin, user } = useAuth();
+  const { isAdmin, user, can } = useAuth();
+  const canExport = can('invoicesExport');
   const [invoices, setInvoices] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [dateFilter, setDateFilter] = useState('all'); // 'all', 'today', 'week', 'month', 'custom'
@@ -336,6 +338,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
     setExporting(true);
     try {
       await exportInvoicesXlsx(exportInvoices, exportFilename('xlsx'), exportMeta());
+      storageService.logExport('invoices', 'xlsx', exportInvoices.length);
     } catch (err) {
       alert(`Could not build the Excel file: ${err.message}`);
     }
@@ -344,6 +347,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   const handleExportCSV = () => {
     if (exportInvoices.length === 0) { alert("No invoices to export."); return; }
     exportInvoicesCsv(exportInvoices, exportFilename('csv'), exportMeta());
+    storageService.logExport('invoices', 'csv', exportInvoices.length);
   };
 
   // Print Invoice Function
@@ -389,23 +393,37 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
           <div className="text-[11px] font-bold text-purple-600 mt-1">Across all filtered bills</div>
         </div>
 
+        {/* Downloads are a granted permission (Admin → Data Access). Looking invoices up is not —
+            the archive itself stays fully readable so an operator can find a past bill mid-sale. */}
         <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 flex flex-col justify-center gap-2 shadow-sm border-l-4 border-l-slate-700">
-          <button
-            onClick={handleExportExcel}
-            disabled={exporting}
-            className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10 disabled:opacity-60"
-          >
-            <FileSpreadsheet className="w-4 h-4" /> {exporting ? 'Building…' : 'Export Excel'}
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="btn btn-outline w-full py-1.5 text-[11px] font-bold flex items-center justify-center gap-1.5"
-          >
-            <Download className="w-3.5 h-3.5 text-slate-700" /> CSV
-          </button>
-          <div className="text-[10px] text-center text-slate-500 font-bold leading-tight">
-            Every serial, barcode, staff &amp; store
-          </div>
+          {canExport ? (
+            <>
+              <button
+                onClick={handleExportExcel}
+                disabled={exporting}
+                className="btn btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10 disabled:opacity-60"
+              >
+                <FileSpreadsheet className="w-4 h-4" /> {exporting ? 'Building…' : 'Export Excel'}
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="btn btn-outline w-full py-1.5 text-[11px] font-bold flex items-center justify-center gap-1.5"
+              >
+                <Download className="w-3.5 h-3.5 text-slate-700" /> CSV
+              </button>
+              <div className="text-[10px] text-center text-slate-500 font-bold leading-tight">
+                Every serial, barcode, staff &amp; store
+              </div>
+            </>
+          ) : (
+            <div className="text-center space-y-1.5">
+              <Lock className="w-5 h-5 text-slate-300 mx-auto" />
+              <div className="text-[11px] font-black text-slate-500">Downloads not enabled</div>
+              <div className="text-[10px] font-semibold text-slate-400 leading-tight">
+                Ask an administrator for invoice download access.
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

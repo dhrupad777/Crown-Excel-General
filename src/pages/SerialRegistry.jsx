@@ -13,7 +13,8 @@ import {
   List,
   CheckCircle2,
   AlertCircle,
-  Loader2
+  Loader2,
+  Lock
 } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { Modal } from '../components/Modal';
@@ -28,7 +29,8 @@ import { EDIT_WINDOW_HOURS } from '../config/appConfig';
 const RENDER_CAP_STEP = 200;
 
 export const SerialRegistry = () => {
-  const { isAdmin } = useAuth();
+  const { isAdmin, can } = useAuth();
+  const canExport = can('serialsExport');
 
   const [serials, setSerials] = useState(() => storageService.getSerials());
   const [staffList, setStaffList] = useState(() => storageService.getStaff());
@@ -145,10 +147,12 @@ export const SerialRegistry = () => {
         await exportSerialsXlsx(filteredSerials, exportFilename('xlsx'));
       } catch (err) {
         alert(`Could not build the Excel file: ${err.message}`);
+        return;
       }
     }
     if (kind === 'csv') exportSerialsCsv(filteredSerials, exportFilename('csv'));
     if (kind === 'pdf') exportSerialsPdf(filteredSerials, exportFilename('pdf'), exportSubtitle());
+    storageService.logExport('serials', kind, filteredSerials.length);
   };
 
   const isEditable = (record) =>
@@ -223,23 +227,34 @@ export const SerialRegistry = () => {
             </p>
           </div>
         </div>
+        {/* Downloading the registry and bulk-checking a sheet against it are granted permissions
+            (Admin → Data Access). Searching and viewing a registration is not — warranty lookups
+            are day-to-day work. */}
         <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
-          <button
-            onClick={() => setShowCheckModal(true)}
-            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial border-[#2563eb] text-[#2563eb] hover:bg-blue-50"
-            title="Upload a list of invoiced serials and see which are already registered"
-          >
-            <ShieldCheck className="w-4 h-4" /> Check Serials
-          </button>
-          <button onClick={() => handleExport('xlsx')} className="btn btn-primary text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial shadow-md shadow-blue-500/10">
-            <FileSpreadsheet className="w-4 h-4" /> Excel (.xlsx)
-          </button>
-          <button onClick={() => handleExport('csv')} className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial">
-            <Download className="w-4 h-4 text-slate-700" /> CSV
-          </button>
-          <button onClick={() => handleExport('pdf')} className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial">
-            <FileText className="w-4 h-4 text-slate-700" /> PDF
-          </button>
+          {canExport ? (
+            <>
+              <button
+                onClick={() => setShowCheckModal(true)}
+                className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial border-[#2563eb] text-[#2563eb] hover:bg-blue-50"
+                title="Upload a list of invoiced serials and see which are already registered"
+              >
+                <ShieldCheck className="w-4 h-4" /> Check Serials
+              </button>
+              <button onClick={() => handleExport('xlsx')} className="btn btn-primary text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial shadow-md shadow-blue-500/10">
+                <FileSpreadsheet className="w-4 h-4" /> Excel (.xlsx)
+              </button>
+              <button onClick={() => handleExport('csv')} className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial">
+                <Download className="w-4 h-4 text-slate-700" /> CSV
+              </button>
+              <button onClick={() => handleExport('pdf')} className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial">
+                <FileText className="w-4 h-4 text-slate-700" /> PDF
+              </button>
+            </>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-500 bg-slate-100 border-2 border-slate-200 px-3 py-2 rounded-xl">
+              <Lock className="w-3.5 h-3.5 text-slate-400" /> Downloads not enabled for your account
+            </span>
+          )}
         </div>
       </div>
 

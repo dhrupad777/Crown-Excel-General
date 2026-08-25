@@ -27,7 +27,7 @@ import { runWeeklySnapshotIfDue } from './utils/backup';
 import { useAuth } from './context/AuthContext';
 
 export function App() {
-  const { isAdmin, staff } = useAuth();
+  const { isAdmin, staff, can } = useAuth();
   // A non-admin whose store has no team/region syncs nothing — surface why instead of a blank app.
   const noTeam = !isAdmin && staff && !storageService.getCurrentTeamId();
   const [activeTab, setActiveTab] = useState('billing');
@@ -130,8 +130,12 @@ export function App() {
   };
 
   // Safety net alongside the role-aware Navbar: a non-admin can never land on the Admin tab
-  // (e.g. after being demoted mid-session while the tab is open).
+  // (e.g. after being demoted mid-session while the tab is open). Same for the analytics
+  // Dashboard, whose permission an admin can revoke while the operator is sitting on it.
   if (activeTab === 'admin' && !isAdmin) {
+    setActiveTab('billing');
+  }
+  if (activeTab === 'dashboard' && !can('analytics')) {
     setActiveTab('billing');
   }
 
@@ -205,7 +209,7 @@ export function App() {
         {activeTab === 'registry' && (
           <SerialRegistry />
         )}
-        {activeTab === 'dashboard' && (
+        {activeTab === 'dashboard' && can('analytics') && (
           <RegistrationsDashboard onViewInvoice={handleViewInvoice} />
         )}
         {activeTab === 'admin' && isAdmin && (

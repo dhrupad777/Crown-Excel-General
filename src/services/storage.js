@@ -3,7 +3,7 @@
 // Domain: Electronics (Laptops, Mobile Phones, Tablets, Audio, Wearables & Accessories)
 
 import { firebaseService, serverTimestamp } from './firebase';
-import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
+import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS, normalizePermissions } from '../config/appConfig';
 import { idbPutBundle, idbGetBundle, idbDeleteBundle } from '../utils/backupStore';
 
 const STORAGE_KEYS = {
@@ -54,7 +54,10 @@ class StorageService {
           email: (user.email || '').toLowerCase(),
           displayName: user.displayName || user.email || '',
           role: user.role || 'standard',
-          locationId: user.locationId || ''
+          locationId: user.locationId || '',
+          // Absent on every staff doc written before per-staff permissions existed — normalized to
+          // an all-false map so an ungranted account can bill and nothing more.
+          permissions: normalizePermissions(user.permissions)
         }
       : null;
     // If the team or role changed while already synced (e.g. an admin reassigned this user's team),
@@ -164,6 +167,13 @@ class StorageService {
 
   _isAdmin() {
     return this._currentUser?.role === 'admin';
+  }
+
+  // Does the signed-in operator hold this data permission? Admins hold all of them implicitly.
+  // See DATA_PERMISSIONS in appConfig for what each one gates (downloads + analytics only).
+  can(key) {
+    if (this._isAdmin()) return true;
+    return this._currentUser?.permissions?.[key] === true;
   }
 
   // Persists to localStorage, surfacing quota/private-browsing failures instead of losing data silently.
@@ -1453,6 +1463,20 @@ class StorageService {
       createdAt: serverTimestamp(),
       createdBy: user.email || ''
     });
+  }
+
+  // Every download of business data is recorded. Per-staff permissions gate the BUTTONS, but the
+  // data is already mirrored on the device for billing, so hiding a button can't be the whole
+  // story — this is what makes a bulk export visible after the fact in Admin → Audit.
+  logExport(domain, format, rowCount) {
+    const user = this._currentUser || {};
+    this.appendAudit('data.export', null, {
+      domain,
+      format,
+      rowCount: rowCount ?? 0,
+      teamId: this._currentTeamId(),
+      locationId: user.locationId || ''
+    }, { entity: 'export', entityId: `${domain}.${format}` });
   }
 
   logDuplicateAttempt({ serial, source, locationId, invoiceNoAttempted, productIdAttempted, existing }) {

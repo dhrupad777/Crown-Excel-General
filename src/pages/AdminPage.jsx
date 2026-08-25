@@ -24,10 +24,11 @@ import {
 import { Modal } from '../components/Modal';
 import { DataHealthPanel } from '../components/DataHealthPanel';
 import { BackupsPanel } from '../components/BackupsPanel';
+import { AccessManagementPanel } from '../components/AccessManagementPanel';
 import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
-import { BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS } from '../config/appConfig';
+import { BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS, normalizePermissions } from '../config/appConfig';
 
 const SectionCard = ({ title, subtitle, icon: Icon, accent, actions, children }) => (
   <div className="bg-white border-2 border-slate-300 rounded-2xl overflow-hidden shadow-sm">
@@ -191,7 +192,10 @@ export const AdminPage = () => {
         role: staffForm.role,
         locationId: staffForm.locationId,
         active: staffForm.active,
-        addedBy: editingStaff?.addedBy || myEmail
+        addedBy: editingStaff?.addedBy || myEmail,
+        // Carried through explicitly: this record REPLACES the stored one, so omitting the data
+        // permissions here would silently revoke them every time someone's name or store is edited.
+        permissions: normalizePermissions(editingStaff?.permissions)
       };
       await storageService.saveStaff(record);
       storageService.appendAudit(editingStaff ? 'staff.update' : 'staff.create', before, record, { entity: 'staff', entityId: email });
@@ -474,6 +478,21 @@ export const AdminPage = () => {
 
       {/* Backups — auto-generated on-device snapshots, downloadable as JSON/XML anytime. */}
       <BackupsPanel />
+
+      {/* Data Access — region → store → staff, toggling what each person may download or analyse.
+          Deliberately above the Regions overview: it's the thing an admin comes here to change. */}
+      <SectionCard
+        title="Data Access"
+        subtitle="Choose a region, then a store, then set what each staff member can download or analyse. Billing, drafts, serial scanning, record lookup and invoice printing always stay available — this only controls what leaves the system."
+        icon={ShieldCheck}
+        accent="text-emerald-600"
+      >
+        <AccessManagementPanel
+          regions={regionRows}
+          staffList={staffList}
+          onSaved={() => setStaffList(storageService.getStaff())}
+        />
+      </SectionCard>
 
       {/* Regions overview — the whole region → stores → staff → data picture, with rename */}
       <SectionCard

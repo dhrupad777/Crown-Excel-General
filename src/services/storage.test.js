@@ -479,3 +479,99 @@ describe('ensureLocationsLoaded - fresh terminal', () => {
     expect(firebaseService.fetchCollectionOnce).not.toHaveBeenCalled();
   });
 });
+
+// Per-staff data permissions gate downloads and analytics only. Default is nothing granted, so a
+// brand-new account can bill and look records up, but cannot take data out of the system.
+describe('data permissions - can()', () => {
+  const KEYS = ['invoicesExport', 'serialsExport', 'partnersExport', 'analytics'];
+
+  it('grants nothing to a staff doc written before permissions existed', () => {
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
+    for (const k of KEYS) expect(storageService.can(k)).toBe(false);
+  });
+
+  it('grants everything to an admin, whatever the map says', () => {
+    storageService.setCurrentUser({
+      email: 'a@b.com', role: 'admin', locationId: 'loc-1',
+      permissions: { invoicesExport: false, serialsExport: false, partnersExport: false, analytics: false }
+    });
+    for (const k of KEYS) expect(storageService.can(k)).toBe(true);
+  });
+
+  it('grants exactly the keys an admin turned on', () => {
+    storageService.setCurrentUser({
+      email: 's@b.com', role: 'standard', locationId: 'loc-1',
+      permissions: { invoicesExport: true, analytics: true }
+    });
+    expect(storageService.can('invoicesExport')).toBe(true);
+    expect(storageService.can('analytics')).toBe(true);
+    expect(storageService.can('serialsExport')).toBe(false);
+    expect(storageService.can('partnersExport')).toBe(false);
+  });
+
+  // Anything other than a literal true is a denial - a truthy string from a hand-edited doc, or a
+  // key nobody has heard of, must never open a door.
+  it('only a literal true grants, and unknown keys never do', () => {
+    storageService.setCurrentUser({
+      email: 's@b.com', role: 'standard', locationId: 'loc-1',
+      permissions: { invoicesExport: 'yes', serialsExport: 1, somethingElse: true }
+    });
+    expect(storageService.can('invoicesExport')).toBe(false);
+    expect(storageService.can('serialsExport')).toBe(false);
+    expect(storageService.can('somethingElse')).toBe(false);
+  });
+
+  it('denies everything when nobody is signed in', () => {
+    storageService.setCurrentUser(null);
+    for (const k of KEYS) expect(storageService.can(k)).toBe(false);
+  });
+
+  it('round-trips a permissions map through saveStaff', async () => {
+    storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
+    await storageService.saveStaff({
+      email: 'S@B.com', displayName: 'Nadeem', role: 'standard', locationId: 'loc-1', active: true,
+      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+    });
+    const saved = storageService.getStaffByEmail('s@b.com');
+    expect(saved.permissions.invoicesExport).toBe(true);
+    expect(saved.permissions.serialsExport).toBe(false);
+    expect(firebaseService.updateDocStrict).toHaveBeenCalled();  // cloud-confirmed, not fire-and-forget
+  });
+
+  it('records every export in the audit trail', () => {
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
+    storageService.logExport('invoices', 'xlsx', 42);
+    const call = firebaseService.saveToCloud.mock.calls.find((c) => c[0] === 'auditLog');
+    expect(call).toBeTruthy();
+    expect(call[2].action).toBe('data.export');
+    expect(call[2].after).toMatchObject({ domain: 'invoices', format: 'xlsx', rowCount: 42 });
+    expect(call[2].createdBy).toBe('s@b.com');
+  });
+});
+
+// saveStaff REPLACES the stored document. Every caller that builds a staff record must therefore
+// carry the permissions map through explicitly - the Staff modal edits name/store/role and would
+// otherwise revoke someone's access as a side effect of a rename.
+describe('data permissions survive an unrelated staff edit', () => {
+  it('a record that omits permissions wipes them - so callers must pass them', async () => {
+    storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
+    await storageService.saveStaff({
+      email: 's@b.com', displayName: 'Nadeem', role: 'standard', locationId: 'loc-1', active: true,
+      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+    });
+    expect(storageService.getStaffByEmail('s@b.com').permissions.invoicesExport).toBe(true);
+
+    // The trap: a rename that forgets `permissions`.
+    await storageService.saveStaff({
+      email: 's@b.com', displayName: 'Nadeem Khan', role: 'standard', locationId: 'loc-1', active: true
+    });
+    expect(storageService.getStaffByEmail('s@b.com').permissions).toBeUndefined();
+
+    // ...which is why the UI passes them through. Same edit, done correctly:
+    await storageService.saveStaff({
+      email: 's@b.com', displayName: 'Nadeem Khan', role: 'standard', locationId: 'loc-1', active: true,
+      permissions: { invoicesExport: true, serialsExport: false, partnersExport: false, analytics: false }
+    });
+    expect(storageService.getStaffByEmail('s@b.com').permissions.invoicesExport).toBe(true);
+  });
+});

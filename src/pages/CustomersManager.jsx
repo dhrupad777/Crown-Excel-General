@@ -25,7 +25,8 @@ import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 import { useAuth } from '../context/AuthContext';
 
 export const CustomersManager = () => {
-  const { isAdmin } = useAuth();
+  const { isAdmin, can } = useAuth();
+  const canExport = can('partnersExport');
   const [customers, setCustomers] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [teamFilter, setTeamFilter] = useState('all'); // admin-only cross-team filter
@@ -150,6 +151,7 @@ export const CustomersManager = () => {
         });
       } catch (err) {
         alert(`Could not build the Excel file: ${err.message}`);
+        return;
       }
     }
     if (kind === 'pdf') exportToPdf({
@@ -159,6 +161,7 @@ export const CustomersManager = () => {
       headers: exportHeaders,
       rows: exportRows()
     });
+    storageService.logExport('partners', kind, customers.length);
   };
 
   const handleImport = async (rows, options) => {
@@ -202,27 +205,33 @@ export const CustomersManager = () => {
               <Upload className="w-4 h-4 text-slate-700" /> Import Excel
             </button>
           )}
-          <button
-            onClick={() => handleExport('xlsx')}
-            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
-            title="Export customer list as Excel workbook"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-slate-700" /> Excel
-          </button>
-          <button
-            onClick={() => handleExport('csv')}
-            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
-            title="Export customer list as CSV"
-          >
-            <Download className="w-4 h-4 text-slate-700" /> CSV
-          </button>
-          <button
-            onClick={() => handleExport('pdf')}
-            className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
-            title="Export customer list as PDF"
-          >
-            <FileText className="w-4 h-4 text-slate-700" /> PDF
-          </button>
+          {/* Downloading the partner list is a granted permission (Admin → Data Access). Searching
+              and attaching a partner to a bill is not — that's the sale itself. */}
+          {canExport && (
+            <>
+              <button
+                onClick={() => handleExport('xlsx')}
+                className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+                title="Export customer list as Excel workbook"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-slate-700" /> Excel
+              </button>
+              <button
+                onClick={() => handleExport('csv')}
+                className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+                title="Export customer list as CSV"
+              >
+                <Download className="w-4 h-4 text-slate-700" /> CSV
+              </button>
+              <button
+                onClick={() => handleExport('pdf')}
+                className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
+                title="Export customer list as PDF"
+              >
+                <FileText className="w-4 h-4 text-slate-700" /> PDF
+              </button>
+            </>
+          )}
           <button
             onClick={handleCreateNew}
             className="btn btn-primary text-xs py-2.5 px-5 font-bold flex-1 sm:flex-initial shadow-md shadow-blue-500/20"

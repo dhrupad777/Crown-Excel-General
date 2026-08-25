@@ -24,7 +24,7 @@ import { storageService } from '../services/storage';
 import { useAuth } from '../context/AuthContext';
 
 export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
-  const { user, isAdmin, signOut } = useAuth();
+  const { user, isAdmin, can, signOut } = useAuth();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [soundEnabled, setSoundEnabled] = useState(audioService.enabled);
   const [stats, setStats] = useState(storageService.getDashboardStats());
@@ -94,7 +94,11 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       items: [
         { id: 'serials', label: 'Serial Capture', icon: ScanLine },
         { id: 'registry', label: 'Serial Registry', icon: ShieldCheck, count: stats.serialsCount },
-        { id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries },
+        // The Dashboard is analytics, not day-to-day work — shown only to staff granted it
+        // (Admin → Data Access). Admins always see it.
+        ...(can('analytics')
+          ? [{ id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries }]
+          : []),
       ]
     },
     ...(isAdmin ? [{
