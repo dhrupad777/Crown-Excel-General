@@ -169,6 +169,15 @@ class StorageService {
     return this._currentUser?.role === 'admin';
   }
 
+  // Trailing-debounced 'serials changed' announcement. A burst of acknowledgements collapses into
+  // one notification; the cache itself is always already up to date by the time this fires.
+  _announceSerialsChange() {
+    clearTimeout(this._serialsAnnounceTimer);
+    this._serialsAnnounceTimer = setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'serials' } }));
+    }, 300);
+  }
+
   // Does the signed-in operator hold this data permission? Admins hold all of them implicitly.
   // See DATA_CATEGORIES in appConfig: each category has a view key (the tab) and a download key.
   can(key) {
@@ -223,8 +232,13 @@ class StorageService {
     // Also team-scoped for display; the doc id stays the bare serial so the create-only transaction
     // still guarantees one physical unit is registered once across the whole business.
     firebaseService.subscribeToCollection('serials', (cloudSerials) => {
+      // The CACHE is replaced immediately — scan-time duplicate detection reads it synchronously
+      // and must never see stale data. Only the UI notification is coalesced: registering a large
+      // bill acks ~250 times in a burst, and each event made the navbar recompute the dashboard
+      // stats, re-parsing every invoice, product and partner out of localStorage. That thrash was
+      // most of the "registering serials is slow".
       this._serialsCache = cloudSerials || [];
-      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'serials' } }));
+      this._announceSerialsChange();
     }, team);
 
     // Staff & locations are the shared roster + team list — every signed-in user needs them, so
@@ -1034,11 +1048,27 @@ class StorageService {
     invoices.forEach((inv) => {
       const items = (inv.items || []).filter((i) => String(i.imei || '').trim());
       if (!items.length) return;
-      const miss = items.filter((i) => !registered.has(normalizeSerial(i.imei))).length;
+      // Keep the actual serials, not just a count: "3 of 40 missing" tells an admin there is a
+      // problem but not which units, and finding them by hand across a 40-line bill is the whole
+      // reason this went unnoticed before.
+      const missingSerials = items
+        .filter((i) => !registered.has(normalizeSerial(i.imei)))
+        .map((i) => normalizeSerial(i.imei));
       billedTotal += items.length;
-      missingTotal += miss;
-      if (miss > 0) {
-        underRegistered.push({ id: inv.id, label: inv.invoiceNo || inv.id, billed: items.length, missing: miss, teamId: inv.teamId || '' });
+      missingTotal += missingSerials.length;
+      if (missingSerials.length > 0) {
+        const storeIds = [...new Set(items.map((i) => i.locationId).filter(Boolean))];
+        underRegistered.push({
+          id: inv.id,
+          label: inv.invoiceNo || inv.id,
+          billed: items.length,
+          missing: missingSerials.length,
+          missingSerials: missingSerials.slice(0, 50),
+          teamId: inv.teamId || '',
+          date: inv.date || '',
+          store: storeIds.map((sid) => this.getLocationName(sid)).filter(Boolean).join(', '),
+          status: inv.status || 'final'
+        });
       }
     });
     findings.push({
@@ -1049,6 +1079,7 @@ class StorageService {
         ? `${missingTotal} of ${billedTotal} billed serials are not in the registry`
         : `All ${billedTotal} billed serials are registered`,
       items: underRegistered,
+      itemNoun: 'invoice',
       repair: missingTotal > 0 ? 'registerMissingSerials' : null
     });
 
@@ -1218,11 +1249,15 @@ class StorageService {
   // Returns { registered: [{serial}], duplicates: [{serial, existing}], failed: [{serial, error}] }.
   // `teamId` defaults to the caller's own region; pass it explicitly when re-registering another
   // team's bill (an admin repairing a Nigeria invoice must not stamp it with the admin's region).
-  async registerSerials({ product, serials, customer, invoiceNo, locationId, locationName, remarks, source = 'capture', batchId, teamId }) {
+  async registerSerials({ product, serials, customer, invoiceNo, locationId, locationName, remarks, source = 'capture', batchId, teamId, audit = true }) {
     const user = this._currentUser || {};
     const results = { registered: [], duplicates: [], failed: [] };
     const bid = batchId || 'batch-' + Date.now();
     const seen = new Set();
+    // Accumulated and spliced into the cache ONCE at the end. Rebuilding _serialsCache per serial
+    // was O(n²) across a batch — with ~3.7k serials on record that is millions of array operations
+    // for a single large bill.
+    const created = [];
 
     for (const raw of serials || []) {
       const id = normalizeSerial(raw);
@@ -1268,8 +1303,8 @@ class StorageService {
         results.registered.push({ serial: id });
         // Optimistic cache insert so the very next scan sees it; the live snapshot replaces
         // the whole cache moments later with the server copy (incl. resolved createdAt).
-        this._serialsCache = [{ ...record, id }, ...this._serialsCache.filter(s => s.id !== id)];
-        this.appendAudit('serial.create', null, record, { entity: 'serial', entityId: id });
+        // Batched below — see `created`.
+        created.push({ ...record, id });
       } else if (res.exists) {
         results.duplicates.push({ serial: id, existing: res.existing });
         this.logDuplicateAttempt({
@@ -1285,8 +1320,31 @@ class StorageService {
       }
     }
 
-    if (results.registered.length > 0) {
-      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'serials' } }));
+    if (created.length > 0) {
+      const fresh = new Set(created.map((r) => r.id));
+      this._serialsCache = [...created, ...this._serialsCache.filter((s) => !fresh.has(s.id))];
+
+      // ONE audit entry for the batch, not one per serial. The serial document itself already
+      // records createdBy, createdAt, registeredByName, locationName and invoiceNo — a per-serial
+      // log line duplicated all of that for a second write, and had grown to 96% of the audit log
+      // (4,735 of 4,915 entries), doubling the network cost of every registration.
+      // `serial.update` and logDuplicateAttempt still log individually: a correction and a resale
+      // attempt are each a distinct event worth its own line.
+      if (audit) {
+        this.appendAudit('serial.registerBatch', null, {
+          invoiceNo: invoiceNo || '',
+          productName: product?.name || '',
+          registered: results.registered.length,
+          duplicates: results.duplicates.length,
+          failed: results.failed.length,
+          teamId: teamId || this._currentTeamId(),
+          locationId: locationId || '',
+          source,
+          serials: created.slice(0, 200).map((r) => r.id)
+        }, { entity: 'serialBatch', entityId: bid });
+      }
+
+      this._announceSerialsChange();
     }
     return results;
   }
@@ -1323,14 +1381,25 @@ class StorageService {
   // Transactions target distinct docs, so parallelism cannot weaken the create-only duplicate
   // guarantee. Safe to re-run: already-registered serials come back as `duplicates`, which is
   // exactly how the "register missing serials" repair works.
-  async registerSerialsFromInvoice(invoice) {
+  async registerSerialsFromInvoice(invoice, { onProgress } = {}) {
     const allItems = (invoice?.items || []).filter(it => String(it.imei || '').trim());
     // Skip serials already in the registry so a continued bill (or a re-run) only writes the NEW
-    // units, not all 250 again — the registry read is what makes this idempotent AND cheap.
+    // units, not all 250 again — the registry read is what makes this idempotent AND cheap. It is
+    // also what makes an interrupted batch safe to simply re-run.
     const items = allItems.filter(it => !this.findSerial(it.imei));
 
     const totals = { registered: [], duplicates: [], failed: [], billed: allItems.length };
     if (items.length === 0) return totals;
+
+    // Progress is broadcast as well as called back, so the Billing Desk modal and the sidebar can
+    // both render it without being wired to each other.
+    const report = (done) => {
+      onProgress?.({ done, total: items.length });
+      window.dispatchEvent(new CustomEvent('crown-registration-progress', {
+        detail: { invoiceNo: invoice.invoiceNo || invoice.id, done, total: items.length }
+      }));
+    };
+    report(0);
     const invNo = invoice.invoiceNo || invoice.id;
     // Attribute to the BILL's own store/region, not whoever happens to be running this — an admin
     // repairing a Nigeria invoice must not stamp those serials with the admin's own region. The
@@ -1357,7 +1426,10 @@ class StorageService {
         remarks: item.remarks || '',
         source: item.source || 'billing',
         batchId: invNo,
-        teamId
+        teamId,
+        // Suppressed per call: this loop calls registerSerials once PER ITEM, so per-call auditing
+        // would still be one log line per serial. One entry for the whole invoice is written below.
+        audit: false
       });
       }));
       results.forEach((res) => {
@@ -1365,6 +1437,19 @@ class StorageService {
         totals.duplicates.push(...res.duplicates);
         totals.failed.push(...res.failed);
       });
+      report(Math.min(i + CHUNK, items.length));
+    }
+
+    if (totals.registered.length > 0 || totals.duplicates.length > 0 || totals.failed.length > 0) {
+      this.appendAudit('serial.registerBatch', null, {
+        invoiceNo: invNo,
+        registered: totals.registered.length,
+        duplicates: totals.duplicates.length,
+        failed: totals.failed.length,
+        billed: totals.billed,
+        teamId,
+        serials: totals.registered.slice(0, 200).map((r) => r.serial)
+      }, { entity: 'serialBatch', entityId: invNo });
     }
     return totals;
   }

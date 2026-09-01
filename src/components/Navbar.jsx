@@ -32,6 +32,8 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [syncIssue, setSyncIssue] = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
+  // { done, total } while a serial batch is writing; cleared when it completes.
+  const [registration, setRegistration] = useState(null);
 
   useEffect(() => {
     const handleNetwork = (e) => setIsOnline(e.detail?.online ?? navigator.onLine);
@@ -46,6 +48,13 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     const handleSyncError = (e) => setSyncIssue({ message: e.detail?.message || 'A save did not reach the cloud.', at: Date.now() });
     window.addEventListener('crown-sync-error', handleSyncError);
     window.addEventListener('crown-storage-error', handleSyncError);
+
+    // Serial registration progress, broadcast by registerSerialsFromInvoice.
+    const handleRegistration = (e) => {
+      const { done, total } = e.detail || {};
+      setRegistration(total && done < total ? { done, total } : null);
+    };
+    window.addEventListener('crown-registration-progress', handleRegistration);
 
     // Unconfirmed writes are tracked durably; keep a live count in the chrome.
     const handlePending = () => setPendingCount(storageService.getPendingCount());
@@ -67,6 +76,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       window.removeEventListener('crown-data-change', handleDataChange);
       window.removeEventListener('crown-sync-error', handleSyncError);
       window.removeEventListener('crown-storage-error', handleSyncError);
+      window.removeEventListener('crown-registration-progress', handleRegistration);
       window.removeEventListener('crown-pending-change', handlePending);
       window.removeEventListener('crown-issue', handlePending);
       clearInterval(interval);
@@ -237,6 +247,31 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
             >
               <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse flex-shrink-0" />
               <span className="truncate">{pendingCount} change{pendingCount === 1 ? '' : 's'} awaiting sync</span>
+            </div>
+          )}
+
+          {/* Serial registration in flight. Lives here rather than only in the saved-bill popup so
+              it survives "Next Bill" — a large batch takes a while, and an operator who can't see
+              it running is an operator who closes the tab half way through. */}
+          {registration && (
+            <div
+              className="px-3 py-2 rounded-lg bg-blue-50 border-2 border-blue-200 space-y-1.5"
+              title="Writing serials to the warranty registry. Don't close the tab until it finishes."
+              role="status"
+            >
+              <div className="flex items-center justify-between gap-2 text-[11px] font-black text-[#2563eb]">
+                <span className="truncate flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#2563eb] animate-pulse flex-shrink-0" />
+                  Registering serials
+                </span>
+                <span className="font-mono flex-shrink-0">{registration.done}/{registration.total}</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-blue-200 overflow-hidden">
+                <div
+                  className="h-full bg-[#2563eb] transition-[width] duration-300"
+                  style={{ width: registration.total ? `${(registration.done / registration.total) * 100}%` : '0%' }}
+                />
+              </div>
             </div>
           )}
 

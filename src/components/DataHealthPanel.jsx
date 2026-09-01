@@ -111,7 +111,7 @@ export const DataHealthPanel = () => {
                 <div className="flex items-center gap-2">
                   {f.items?.length > 0 && (
                     <button onClick={() => toggle(f.key)} className="btn btn-outline text-[11px] py-1.5 px-3 font-bold">
-                      {open ? 'Hide' : `Show ${f.items.length}`}
+                      {open ? 'Hide' : `Show ${f.items.length} ${f.itemNoun || 'record'}${f.items.length === 1 ? '' : 's'}`}
                     </button>
                   )}
                   {f.repair && (
@@ -125,24 +125,49 @@ export const DataHealthPanel = () => {
                   )}
                 </div>
               </div>
+              {/* Each finding type gets its own row shape. The old version concatenated whatever
+                  optional fields happened to exist, which for the warranty check produced a bare
+                  "3 of 40 missing" with no way to tell WHICH bill or WHICH serials. */}
               {open && f.items?.length > 0 && (
-                <div className="border-t border-slate-200 bg-slate-50 max-h-56 overflow-y-auto">
-                  <table className="w-full text-[11px]">
-                    <tbody className="divide-y divide-slate-200">
-                      {f.items.map((it, idx) => (
-                        <tr key={`${it.id}-${idx}`}>
-                          <td className="p-2 font-mono font-bold text-slate-700 truncate max-w-[220px]">{it.label || it.id}</td>
-                          <td className="p-2 font-semibold text-slate-500 whitespace-nowrap">
-                            {it.missing != null ? `${it.missing} of ${it.billed} missing` : ''}
-                            {it.collection ? it.collection : ''}
-                            {it.kind ? it.kind : ''}
-                            {it.local != null ? `${it.local} local / ${it.cloud} cloud` : ''}
-                            {it.error ? it.error : ''}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="border-t border-slate-200 bg-slate-50 max-h-72 overflow-y-auto divide-y divide-slate-200">
+                  {f.items.map((it, idx) => (
+                    <div key={`${it.id}-${idx}`} className="p-2.5 space-y-1">
+                      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                        <span className="font-mono font-black text-slate-800">{it.label || it.id}</span>
+                        <span className="text-[10px] font-bold text-slate-500">
+                          {[
+                            it.teamId,
+                            it.store,
+                            it.date ? new Date(it.date).toLocaleDateString() : '',
+                            it.status && it.status !== 'final' ? it.status.toUpperCase() : ''
+                          ].filter(Boolean).join(' · ')}
+                        </span>
+                      </div>
+
+                      {it.missing != null && (
+                        <div className="text-[11px] font-bold text-red-600">
+                          {it.missing} of {it.billed} serial{it.billed === 1 ? '' : 's'} not registered
+                        </div>
+                      )}
+                      {it.missingSerials?.length > 0 && (
+                        <div className="font-mono text-[10px] text-slate-600 break-all leading-relaxed">
+                          {it.missingSerials.join(', ')}
+                          {it.missing > it.missingSerials.length && ` … +${it.missing - it.missingSerials.length} more`}
+                        </div>
+                      )}
+
+                      {(it.collection || it.kind || it.local != null || it.error) && (
+                        <div className="text-[11px] font-semibold text-slate-500">
+                          {[
+                            it.collection,
+                            it.kind,
+                            it.local != null ? `${it.local} local / ${it.cloud} cloud` : '',
+                            it.error
+                          ].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

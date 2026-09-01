@@ -588,3 +588,101 @@ describe('data permissions survive an unrelated staff edit', () => {
     expect(storageService.getStaffByEmail('s@b.com').permissions.invoicesExport).toBe(true);
   });
 });
+
+// Registering a large bill used to cost TWO cloud writes per serial: the transaction, plus a full
+// duplicate of the record in the audit log. That second write had grown to 96% of the audit
+// collection (4,735 of 4,915 entries) for information the serial document already carries.
+describe('serial registration cost and progress', () => {
+  const invoiceWith = (n) => ({
+    invoiceNo: 'BIG', teamId: 'Dubai', locationId: 'loc-1', customer: { company: 'ACME' },
+    items: Array.from({ length: n }, (_, i) => ({ name: 'W', imei: `SN${i}`, qty: 1 }))
+  });
+
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });
+    storageService._serialsCache = [];
+  });
+
+  const auditCalls = () => firebaseService.saveToCloud.mock.calls.filter((c) => c[0] === 'auditLog');
+
+  it('writes ONE audit entry for a whole batch, not one per serial', async () => {
+    const res = await storageService.registerSerialsFromInvoice(invoiceWith(50));
+    expect(res.registered).toHaveLength(50);
+    expect(firebaseService.createIfAbsent).toHaveBeenCalledTimes(50);  // one transaction per serial
+    expect(auditCalls()).toHaveLength(1);                              // but a single audit line
+    expect(auditCalls()[0][2].action).toBe('serial.registerBatch');
+    expect(auditCalls()[0][2].after).toMatchObject({ invoiceNo: 'BIG', registered: 50 });
+  });
+
+  it('reports progress from 0 up to the total', async () => {
+    const seen = [];
+    await storageService.registerSerialsFromInvoice(invoiceWith(45), {
+      onProgress: (p) => seen.push(p)
+    });
+    expect(seen[0]).toEqual({ done: 0, total: 45 });
+    expect(seen[seen.length - 1]).toEqual({ done: 45, total: 45 });
+    // monotonic, never past the total
+    for (let i = 1; i < seen.length; i += 1) {
+      expect(seen[i].done).toBeGreaterThanOrEqual(seen[i - 1].done);
+      expect(seen[i].done).toBeLessThanOrEqual(45);
+    }
+  });
+
+  // The cache used to be rebuilt per serial (a filter over every existing record), which is O(n^2)
+  // across a batch. It is now spliced once - this guards that the result is still correct.
+  it('leaves every registered serial in the cache exactly once', async () => {
+    storageService._serialsCache = [{ id: 'OLD1', serial: 'OLD1', teamId: 'Dubai' }];
+    await storageService.registerSerialsFromInvoice(invoiceWith(30));
+
+    const ids = storageService._serialsCache.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);        // no duplicates
+    expect(ids).toContain('OLD1');                      // pre-existing rows survive
+    for (let i = 0; i < 30; i += 1) expect(ids).toContain(`SN${i}`);
+    expect(storageService.findSerial('SN29')).toBeTruthy();
+  });
+
+  it('re-running an already-registered bill writes nothing at all', async () => {
+    const inv = invoiceWith(10);
+    await storageService.registerSerialsFromInvoice(inv);
+    vi.clearAllMocks();
+
+    const again = await storageService.registerSerialsFromInvoice(inv);
+    expect(again.registered).toHaveLength(0);
+    expect(firebaseService.createIfAbsent).not.toHaveBeenCalled();
+    expect(auditCalls()).toHaveLength(0);
+  });
+});
+
+// "3 of 40 missing" told an admin there was a problem but not which units, on a bill that could
+// have 40 lines. The finding now names them.
+describe('data health names the missing serials', () => {
+  it('reports which invoice, which serials, and where', async () => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([
+      { id: 'loc-1', team: 'Dubai', name: 'Crown Excel Shop', active: true }
+    ]));
+    storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
+    localStorage.setItem('crown_excel_invoices_v2', JSON.stringify([{
+      id: 'Dubai__305', invoiceNo: '305', teamId: 'Dubai', date: '2026-08-12T10:00:00.000Z',
+      status: 'final', customer: { company: 'ACME' },
+      items: [
+        { name: 'W', imei: 'HERE1', qty: 1, locationId: 'loc-1' },
+        { name: 'W', imei: 'GONE1', qty: 1, locationId: 'loc-1' },
+        { name: 'W', imei: 'GONE2', qty: 1, locationId: 'loc-1' }
+      ]
+    }]));
+    storageService._serialsCache = [{ id: 'HERE1', serial: 'HERE1', teamId: 'Dubai' }];
+
+    const report = await storageService.runDataHealthCheck({ includeCloudCounts: false });
+    const warranty = report.findings.find((f) => f.key === 'warranty');
+
+    expect(warranty.severity).toBe('error');
+    expect(warranty.items).toHaveLength(1);
+    expect(warranty.items[0]).toMatchObject({
+      label: '305', billed: 3, missing: 2, teamId: 'Dubai', store: 'Crown Excel Shop'
+    });
+    expect(warranty.items[0].missingSerials).toEqual(['GONE1', 'GONE2']);
+    expect(warranty.itemNoun).toBe('invoice');
+    storageService._serialsCache = [];
+  });
+});

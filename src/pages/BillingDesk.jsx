@@ -89,6 +89,8 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
   const [savedInvoice, setSavedInvoice] = useState(null);
   // Outcome of the post-save warranty auto-registration (null while in flight)
   const [registryReport, setRegistryReport] = useState(null);
+  // Live { done, total } while serials are being written; null when idle.
+  const [progress, setProgress] = useState(null);
 
   // The invoice number for this bill. Starts blank — the operator types their own number every
   // time; it's required and must be unique (both enforced on save in handleFinalizeBill).
@@ -120,6 +122,18 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     window.addEventListener('beforeunload', warnOnUnload);
     return () => window.removeEventListener('beforeunload', warnOnUnload);
   }, [isDirty]);
+
+  // Serial registration runs in the background so the till isn't frozen, but closing the tab
+  // mid-batch abandons whatever hasn't been written yet — which is exactly how large bills ended
+  // up only partly registered. Warn while it's in flight. (Re-running is safe either way:
+  // registerSerialsFromInvoice skips serials already on record, and Data Health can finish the job.)
+  const registering = !!progress && progress.done < progress.total;
+  useEffect(() => {
+    if (!registering) return;
+    const warnOnUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warnOnUnload);
+    return () => window.removeEventListener('beforeunload', warnOnUnload);
+  }, [registering]);
 
   // Total unit count across all scanned items
   const totalUnits = items.reduce((acc, item) => acc + item.qty, 0);
@@ -448,12 +462,14 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     // in place if still open, and any shortfall is visible + one-click repairable in Invoices
     // Archive and Data Health. Not awaited on purpose.
     setRegistryReport({ invoiceId: saved.id, pending: true, registered: [], duplicates: [], failed: [], billed: (saved.items || []).length });
-    storageService.registerSerialsFromInvoice(saved)
+    setProgress({ done: 0, total: (saved.items || []).length });
+    storageService.registerSerialsFromInvoice(saved, { onProgress: setProgress })
       .then((reg) => setRegistryReport({ invoiceId: saved.id, ...reg }))
       .catch((err) => {
         console.warn('Warranty auto-registration failed:', err.message);
         setRegistryReport({ invoiceId: saved.id, registered: [], duplicates: [], failed: items.map((it) => ({ serial: it.imei })), billed: items.length });
-      });
+      })
+      .finally(() => setProgress(null));
   };
 
   const resetForNextBill = () => {
@@ -1278,10 +1294,29 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
                   Serials register when this draft is <b className="text-slate-700">finalized</b> — find it under the <b className="text-amber-700">Drafts</b> tab.
                 </p>
               ) : !registryReport || registryReport.invoiceId !== savedInvoice.id || registryReport.pending ? (
-                <p className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                  Registering serials in the background — <span className="font-bold text-slate-600">safe to continue to the next bill.</span>
-                </p>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                      Registering serials…
+                    </span>
+                    {progress && (
+                      <span className="text-xs font-mono font-black text-slate-700">
+                        {progress.done} / {progress.total}
+                      </span>
+                    )}
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+                    <div
+                      className="h-full bg-[#2563eb] transition-[width] duration-300"
+                      style={{ width: progress?.total ? `${(progress.done / progress.total) * 100}%` : '0%' }}
+                    />
+                  </div>
+                  <p className="text-[11px] font-semibold text-slate-500">
+                    Safe to start the next bill — this keeps going in the sidebar.
+                    <b className="text-slate-700"> Don’t close the tab until it finishes.</b>
+                  </p>
+                </div>
               ) : (
                 <div className="text-xs font-bold space-y-1">
                   {/* An incomplete registration used to be invisible here — the sale saves either
