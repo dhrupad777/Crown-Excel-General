@@ -280,20 +280,28 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
   // Handle Delete
   // Voiding keeps the bill and its number in the record; a reason is mandatory, because "why was
   // this invoice cancelled" is the first question asked about any voided document.
-  const handleDeleteInvoice = (id, e) => {
+  const handleDeleteInvoice = async (id, e) => {
     e.stopPropagation();
     const reason = window.prompt(
-      `Void invoice ${id}?\n\nThe bill keeps its number and stays in the record (marked "Voided") — it is not erased.\n\nReason for voiding (required):`
+      `Void invoice ${id}?\n\nThe bill keeps its number and stays in the record (marked "Voided") — it is not erased.\n\nIts serials are REMOVED from the warranty registry so those units can be sold again. That removal is permanent: if you restore this bill later, they are registered afresh with today's date, not the original sale date.\n\nReason for voiding (required):`
     );
     if (reason === null) return;
     if (!reason.trim()) {
       alert('A reason is required to void an invoice.');
       return;
     }
-    storageService.deleteInvoice(id, reason.trim());
+    const result = await storageService.deleteInvoice(id, reason.trim());
     loadInvoices();
     if (selectedInvoice && selectedInvoice.id === id) {
       setShowDetailModal(false);
+    }
+    // `{ ok: false }` is still a truthy object — check the flag, or a failed void reads as a clean one.
+    if (!result.ok) {
+      alert('This invoice was NOT voided — the record could not be updated. Nothing has changed; please try again.');
+      return;
+    }
+    if (result.failed?.length) {
+      alert(`Invoice voided, but ${result.failed.length} serial(s) could not be released from the registry: ${result.failed.join(', ')}. They will still block a re-sale until an admin runs Admin → Data Health → Repair.`);
     }
   };
 

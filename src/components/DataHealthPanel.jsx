@@ -39,7 +39,7 @@ export const DataHealthPanel = () => {
     try {
       if (kind === 'registerMissingSerials') {
         const r = await storageService.repairMissingRegistrations();
-        setRepairMsg(`Repaired ${r.invoices} bill(s): ${r.registered} registered, ${r.duplicates} already on record${r.failed ? `, ${r.failed} failed` : ''}.`);
+        setRepairMsg(`Repaired ${r.invoices} bill(s): ${r.registered} registered, ${r.duplicates} already on record${r.released ? `, ${r.released} serials released from voided bills` : ''}${r.partnersSynced ? `, ${r.partnersSynced} partner name(s) synced` : ''}${r.failed ? `, ${r.failed} failed` : ''}.`);
       }
       if (kind === 'retryPending') {
         const r = await storageService.retryPendingWrites();
@@ -120,7 +120,7 @@ export const DataHealthPanel = () => {
                       disabled={!!repairing}
                       className="btn btn-primary text-[11px] py-1.5 px-3 font-bold disabled:opacity-60 flex items-center gap-1.5"
                     >
-                      {repairing === f.repair ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wrench className="w-3.5 h-3.5" />} Repair
+                      {repairing === f.repair ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wrench className="w-3.5 h-3.5" />} {f.repairLabel || 'Repair'}
                     </button>
                   )}
                 </div>

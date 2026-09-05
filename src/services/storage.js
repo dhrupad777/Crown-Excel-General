@@ -523,7 +523,7 @@ class StorageService {
     };
   }
 
-  restoreRecord(collection, id) {
+  async restoreRecord(collection, id) {
     const key = this._collectionKey(collection);
     if (!key) return false;
     const user = this._currentUser || {};
@@ -536,6 +536,13 @@ class StorageService {
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: collection } }));
     firebaseService.saveToCloud(collection, id, restored);
     this.appendAudit(`${collection.replace(/s$/, '')}.restore`, before, restored, { entity: collection, entityId: id });
+    if (collection === 'invoices' && restored.status === 'final') {
+      try {
+        await this.registerSerialsFromInvoice(restored);
+      } catch (e) {
+        console.warn('Restore registration:', e.message);
+      }
+    }
     return true;
   }
 
@@ -620,12 +627,183 @@ class StorageService {
     if (!this._setItem(STORAGE_KEYS.CUSTOMERS, updated)) return null;
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'customers' } }));
 
+    // Existing partner edits must follow onto every bill and registry row that copied this
+    // partner at sale time — otherwise Serial Registry keeps showing the old company/name.
+    if (!isNew) this._propagatePartnerChange(savedCust);
+
     // 2. Cloud — awaited when the caller needs certainty, tracked as pending otherwise.
     if (confirm) {
       return firebaseService.saveToCloudStrict('customers', savedCust.id, savedCust).then(() => savedCust);
     }
     this._syncInBackground('customers', savedCust.id, savedCust);
     return savedCust;
+  }
+
+  // Snapshot stored on invoices and serials. `name` falls back to company so serial rules (which
+  // require a non-empty identifier) stay satisfied for company-only partners.
+  _customerSnapshot(partner, existing = {}) {
+    const company = partner?.company || existing.company || '';
+    const name = String(partner?.name || '').trim() || String(company || '').trim() || String(existing.name || '').trim();
+    return {
+      ...existing,
+      id: partner?.id || existing.id || '',
+      name,
+      company,
+      whatsapp: partner?.whatsapp ?? existing.whatsapp ?? '',
+      email: partner?.email ?? existing.email ?? ''
+    };
+  }
+
+  // Rewrites the copied partner on every invoice (incl. voided) and serial that still points at
+  // this partner id. Local first; serial cloud writes are admin-only and best-effort.
+  _propagatePartnerChange(partner) {
+    if (!partner?.id) return;
+    const snapshot = this._customerSnapshot(partner);
+
+    // Only touch rows whose copy actually differs. Without this, ANY save of an existing partner
+    // sweeps every invoice and every cached serial — and the Excel partner import calls saveCustomer
+    // once per duplicate row under the "update" policy, so a 500-row file would run the whole sweep
+    // 500 times and issue a cloud write per matched serial.
+    const invoices = this._readRaw(STORAGE_KEYS.INVOICES);
+    let invoicesChanged = false;
+    const nextInvoices = invoices.map((inv) => {
+      if (inv.customer?.id !== partner.id) return inv;
+      if (!this._partnerCopyDiffers(inv.customer, partner)) return inv;
+      invoicesChanged = true;
+      const updated = { ...inv, customer: this._customerSnapshot(partner, inv.customer) };
+      this._syncInBackground('invoices', updated.id, updated);
+      return updated;
+    });
+    if (invoicesChanged && this._setItem(STORAGE_KEYS.INVOICES, nextInvoices)) {
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+    }
+
+    this._patchSerialsCustomer(
+      (s) => s.customer?.id === partner.id && this._partnerCopyDiffers(s.customer, partner),
+      snapshot,
+      { reason: 'partner.update', partnerId: partner.id }
+    );
+  }
+
+  _patchSerialsCustomer(predicate, customer, meta = {}) {
+    const ids = [];
+    this._serialsCache = this._serialsCache.map((s) => {
+      if (!predicate(s)) return s;
+      ids.push(s.id || s.serial);
+      return { ...s, customer };
+    });
+    if (ids.length === 0) return;
+    this._announceSerialsChange();
+    const user = this._currentUser || {};
+    if (firebaseService.isInitialized) {
+      ids.forEach((id) => {
+        firebaseService.updateDocStrict('serials', id, {
+          customer,
+          updatedBy: user.email || '',
+          updatedAt: serverTimestamp()
+        }).catch((err) => console.warn('Serial partner sync:', id, err?.message || err));
+      });
+    }
+    this.appendAudit('serial.partnerSync', null, {
+      ...meta,
+      count: ids.length,
+      serials: ids.slice(0, 200)
+    }, { entity: 'serialBatch', entityId: meta.partnerId || meta.invoiceNo || 'partner' });
+  }
+
+  _serialIdsTiedToInvoice(invoice) {
+    const ids = new Set();
+    for (const item of invoice?.items || []) {
+      for (const token of String(item.imei || '').split(/[/,;]+/)) {
+        const id = normalizeSerial(token);
+        if (id) ids.add(id);
+      }
+    }
+    const numbers = [invoice?.invoiceNo, invoice?.id]
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter(Boolean);
+    const teamId = invoice?.teamId || '';
+    for (const s of this._serialsCache) {
+      const sInv = String(s.invoiceNo || '').trim().toLowerCase();
+      if (!sInv || !numbers.includes(sInv)) continue;
+      if (teamId && (s.teamId || '') !== teamId) continue;
+      const id = normalizeSerial(s.serial || s.id);
+      if (id) ids.add(id);
+    }
+    return [...ids];
+  }
+
+  // Drops warranty rows for a voided bill so those units can be sold on a new invoice.
+  // Cloud delete requires admin (firestore.rules); local cache is always cleared so billing
+  // unblocks immediately. Returns { released, failed }.
+  async releaseSerialsForInvoice(invoice) {
+    const ids = this._serialIdsTiedToInvoice(invoice);
+    const released = [];
+    const failed = [];
+    for (const id of ids) {
+      if (firebaseService.isInitialized) {
+        const ok = await firebaseService.deleteFromCloud('serials', id);
+        if (!ok) {
+          failed.push(id);
+          continue;
+        }
+      }
+      this._serialsCache = this._serialsCache.filter((s) => (s.id || s.serial) !== id);
+      released.push(id);
+    }
+    if (released.length > 0) {
+      this._announceSerialsChange();
+      this.appendAudit('serial.releaseBatch', invoice, {
+        invoiceNo: invoice?.invoiceNo || invoice?.id || '',
+        released: released.length,
+        failed: failed.length,
+        serials: released.slice(0, 200)
+      }, { entity: 'serialBatch', entityId: invoice?.id || '' });
+    }
+    return { released, failed };
+  }
+
+  // Do a copied partner and the live record actually differ in the fields that get copied?
+  //
+  // The name comparison MUST apply the same company fallback to both sides. Serials store
+  // `name || company` (their rules demand a non-empty identifier) while invoices store the raw
+  // record — and company is the only required partner field here, so ~2 in 3 partners have an
+  // empty name. Comparing a raw '' against a fallen-back 'ACME' marks every one of them as
+  // permanently "renamed": hundreds of false alarms in Data Health, and a Repair that rewrites
+  // all their invoices and serials for nothing.
+  _partnerCopyDiffers(copied, live) {
+    const nameOf = (r) => String(r?.name || '').trim() || String(r?.company || '').trim();
+    return String(copied?.company || '') !== String(live?.company || '')
+      || nameOf(copied) !== nameOf(live)
+      || String(copied?.whatsapp || '') !== String(live?.whatsapp || '')
+      || String(copied?.email || '') !== String(live?.email || '');
+  }
+
+  _partnersWithStaleCopies() {
+    const byId = new Map(this.getCustomers().map((c) => [c.id, c]));
+    const stale = new Map();
+    const check = (copied) => {
+      if (!copied?.id || stale.has(copied.id)) return;
+      const live = byId.get(copied.id);
+      if (!live) return;
+      if (this._partnerCopyDiffers(copied, live)) stale.set(live.id, live);
+    };
+    this.getInvoicesIncludingArchived().forEach((inv) => check(inv.customer));
+    this.getSerials().forEach((s) => check(s.customer));
+    return [...stale.values()];
+  }
+
+  _serialsLockedToVoidedInvoices() {
+    const locked = [];
+    const seen = new Set();
+    for (const inv of this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted)) {
+      for (const id of this._serialIdsTiedToInvoice(inv)) {
+        if (seen.has(id) || !this.findSerial(id)) continue;
+        seen.add(id);
+        locked.push({ id, label: `${id} → ${inv.invoiceNo || inv.id} (voided)` });
+      }
+    }
+    return locked;
   }
 
   deleteCustomer(id) {
@@ -902,14 +1080,26 @@ class StorageService {
     const saved = this.saveInvoice(updated); // existing id → updates in place, no re-stamp of biller
     if (saved) {
       this.appendAudit('invoice.update', before, saved, { entity: 'invoice', entityId: invoiceId });
+      if (patch.customer) {
+        const tied = new Set(this._serialIdsTiedToInvoice(saved));
+        this._patchSerialsCustomer(
+          (s) => tied.has(normalizeSerial(s.serial || s.id)),
+          this._customerSnapshot(patch.customer, saved.customer),
+          { reason: 'invoice.update', invoiceNo: saved.invoiceNo || saved.id }
+        );
+      }
     }
     return saved;
   }
 
   // Voiding a bill is an accounting event: it keeps its number, stays in the record, and must
-  // carry a stated reason. Nothing is ever destroyed here — see purgeExpiredDeletions.
-  deleteInvoice(id, reason = '') {
-    return this._archive(STORAGE_KEYS.INVOICES, 'invoices', id, reason);
+  // carry a stated reason. Serials billed on it are released so the units can be sold again.
+  async deleteInvoice(id, reason = '') {
+    const before = this._readRaw(STORAGE_KEYS.INVOICES).find((r) => r.id === id);
+    const archived = this._archive(STORAGE_KEYS.INVOICES, 'invoices', id, reason);
+    if (!archived || !before) return { ok: false, released: [], failed: [] };
+    const release = await this.releaseSerialsForInvoice(before);
+    return { ok: true, ...release };
   }
 
   // Turns a draft into a real invoice: status → 'final', then register its serials (background,
@@ -955,6 +1145,7 @@ class StorageService {
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
     await firebaseService.saveToCloudStrict('invoices', id, cancelled);
     this.appendAudit('invoice.cancel', before, cancelled, { entity: 'invoice', entityId: id });
+    await this.releaseSerialsForInvoice(before);
     return cancelled;
   }
 
@@ -1080,7 +1271,36 @@ class StorageService {
         : `All ${billedTotal} billed serials are registered`,
       items: underRegistered,
       itemNoun: 'invoice',
-      repair: missingTotal > 0 ? 'registerMissingSerials' : null
+      repair: missingTotal > 0 ? 'registerMissingSerials' : null,
+      repairLabel: 'Register missing'
+    });
+
+    const lockedToVoided = this._serialsLockedToVoidedInvoices();
+    findings.push({
+      key: 'voidedSerials',
+      title: 'Serials on voided invoices',
+      severity: lockedToVoided.length > 0 ? 'error' : 'ok',
+      summary: lockedToVoided.length > 0
+        ? `${lockedToVoided.length} serial(s) still marked sold on a voided bill`
+        : 'No serials are locked to a voided invoice',
+      items: lockedToVoided.slice(0, 200),
+      itemNoun: 'serial',
+      repair: lockedToVoided.length > 0 ? 'registerMissingSerials' : null,
+      repairLabel: 'Release them'
+    });
+
+    const stalePartners = this._partnersWithStaleCopies();
+    findings.push({
+      key: 'partnerDrift',
+      title: 'Partner name on bills / registry',
+      severity: stalePartners.length > 0 ? 'warn' : 'ok',
+      summary: stalePartners.length > 0
+        ? `${stalePartners.length} partner(s) renamed, but invoices or serials still show the old name`
+        : 'Billed-to names match the partner records',
+      items: stalePartners.slice(0, 200).map((p) => ({ id: p.id, label: p.company || p.name || p.id })),
+      itemNoun: 'partner',
+      repair: stalePartners.length > 0 ? 'registerMissingSerials' : null,
+      repairLabel: 'Sync names'
     });
 
     // 2. Missing / unknown region — these records are invisible to every store user.
@@ -1204,7 +1424,16 @@ class StorageService {
 
   // Repairs every under-registered bill in one pass (the Data Health "warranty" repair).
   async repairMissingRegistrations() {
-    const totals = { invoices: 0, registered: 0, duplicates: 0, failed: 0 };
+    const totals = { invoices: 0, registered: 0, duplicates: 0, failed: 0, released: 0, partnersSynced: 0 };
+    for (const inv of this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted)) {
+      const r = await this.releaseSerialsForInvoice(inv);
+      totals.released += r.released.length;
+      totals.failed += r.failed.length;
+    }
+    for (const partner of this._partnersWithStaleCopies()) {
+      this._propagatePartnerChange(partner);
+      totals.partnersSynced += 1;
+    }
     const registered = new Set(this.getSerials().map((s) => normalizeSerial(s.serial || s.id)));
     for (const inv of this.getInvoices()) {
       const items = (inv.items || []).filter((i) => String(i.imei || '').trim());

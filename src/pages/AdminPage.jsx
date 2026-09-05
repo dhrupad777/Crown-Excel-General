@@ -123,8 +123,9 @@ export const AdminPage = () => {
   const purgeDate = (deletedAt) =>
     deletedAt ? new Date(new Date(deletedAt).getTime() + DELETION_RETENTION_DAYS * 24 * 60 * 60 * 1000) : null;
 
-  const handleRestore = (rec) => {
-    storageService.restoreRecord(rec.collection, rec.id);
+  const handleRestore = async (rec) => {
+    // Async now: restoring a voided invoice re-registers its serials, so wait before refreshing.
+    await storageService.restoreRecord(rec.collection, rec.id);
     loadAudit();
   };
   const handlePurgeNow = (rec) => {

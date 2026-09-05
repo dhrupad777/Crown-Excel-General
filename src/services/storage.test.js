@@ -686,3 +686,211 @@ describe('data health names the missing serials', () => {
     storageService._serialsCache = [];
   });
 });
+
+describe('partner edits follow onto invoices and serials', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+  });
+
+  it('rewrites billed-to and registry partner when the partner record is renamed', () => {
+    const partner = storageService.saveCustomer({ company: 'OLD CO', name: 'Ali', whatsapp: '971', teamId: 'Dubai' });
+    storageService.saveInvoice({
+      id: 'Dubai__101', invoiceNo: '101', teamId: 'Dubai',
+      customer: { id: partner.id, company: 'OLD CO', name: 'Ali', whatsapp: '971' },
+      items: [{ name: 'W', imei: 'SN-KEEP' }],
+      status: 'final'
+    });
+    storageService.saveInvoice({
+      id: 'Dubai__202', invoiceNo: '202', teamId: 'Dubai',
+      customer: { id: 'someone-else', company: 'OTHER', name: 'Bo', whatsapp: '1' },
+      items: [{ name: 'W', imei: 'SN-OTHER' }],
+      status: 'final'
+    });
+    storageService._serialsCache = [
+      { id: 'SN-KEEP', serial: 'SN-KEEP', invoiceNo: '101', teamId: 'Dubai', customer: { id: partner.id, company: 'OLD CO', name: 'Ali' } },
+      { id: 'SN-OTHER', serial: 'SN-OTHER', invoiceNo: '202', teamId: 'Dubai', customer: { id: 'someone-else', company: 'OTHER', name: 'Bo' } }
+    ];
+
+    storageService.saveCustomer({ ...partner, company: 'NEW CO', name: 'Aliya' });
+
+    expect(storageService.getInvoiceById('Dubai__101').customer).toMatchObject({
+      id: partner.id, company: 'NEW CO', name: 'Aliya'
+    });
+    expect(storageService.getInvoiceById('Dubai__202').customer.company).toBe('OTHER');
+    expect(storageService.findSerial('SN-KEEP').customer).toMatchObject({ company: 'NEW CO', name: 'Aliya' });
+    expect(storageService.findSerial('SN-OTHER').customer.company).toBe('OTHER');
+  });
+
+  it('rewrites registry partner when the invoice billed-to is edited', () => {
+    storageService.saveInvoice({
+      id: 'Dubai__101', invoiceNo: '101', teamId: 'Dubai',
+      customer: { id: 'c1', company: 'OLD CO', name: 'Ali', whatsapp: '971' },
+      items: [{ name: 'W', imei: 'SN1' }],
+      status: 'final', date: new Date().toISOString()
+    });
+    storageService._serialsCache = [
+      { id: 'SN1', serial: 'SN1', invoiceNo: '101', teamId: 'Dubai', customer: { id: 'c1', company: 'OLD CO', name: 'Ali' } }
+    ];
+
+    storageService.editInvoice('Dubai__101', {
+      customer: { id: 'c2', company: 'NEW CO', name: 'Bo', whatsapp: '123' }
+    });
+
+    expect(storageService.getInvoiceById('Dubai__101').customer.company).toBe('NEW CO');
+    expect(storageService.findSerial('SN1').customer).toMatchObject({ id: 'c2', company: 'NEW CO', name: 'Bo' });
+  });
+});
+
+describe('voiding an invoice releases its serials', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+  });
+
+  it('drops registry rows and no longer treats the units as sold', async () => {
+    storageService.saveInvoice({
+      id: 'Dubai__101', invoiceNo: '101', teamId: 'Dubai',
+      customer: { company: 'ACME' },
+      items: [{ name: 'W', imei: 'SN-VOID' }, { name: 'W', imei: 'SN-VOID-2' }],
+      status: 'final'
+    });
+    storageService._serialsCache = [
+      { id: 'SN-VOID', serial: 'SN-VOID', invoiceNo: '101', teamId: 'Dubai', customer: { company: 'ACME', name: 'ACME' } },
+      { id: 'SN-VOID-2', serial: 'SN-VOID-2', invoiceNo: '101', teamId: 'Dubai', customer: { company: 'ACME', name: 'ACME' } },
+      { id: 'SN-KEEP', serial: 'SN-KEEP', invoiceNo: '999', teamId: 'Dubai', customer: { company: 'OTHER', name: 'OTHER' } }
+    ];
+
+    const result = await storageService.deleteInvoice('Dubai__101', 'order cancelled');
+    expect(result.ok).toBe(true);
+    expect(result.released.sort()).toEqual(['SN-VOID', 'SN-VOID-2']);
+    expect(storageService.findSerial('SN-VOID')).toBeNull();
+    expect(storageService.findSerial('SN-VOID-2')).toBeNull();
+    expect(storageService.findSerial('SN-KEEP')).toBeTruthy();
+    expect(storageService.findInvoiceBySerial('SN-VOID')).toEqual([]);
+    expect(storageService.getInvoiceById('Dubai__101')).toBeNull();
+    const archived = JSON.parse(localStorage.getItem('crown_excel_invoices_v2')).find((r) => r.id === 'Dubai__101');
+    expect(archived.deleted).toBe(true);
+  });
+
+  it('re-registers serials when a voided final invoice is restored', async () => {
+    storageService.saveInvoice({
+      id: 'Dubai__101', invoiceNo: '101', teamId: 'Dubai',
+      customer: { company: 'ACME' },
+      items: [{ name: 'W', imei: 'SN-BACK' }],
+      status: 'final'
+    });
+    await storageService.deleteInvoice('Dubai__101', 'oops');
+    await storageService.restoreRecord('invoices', 'Dubai__101');
+    expect(firebaseService.createIfAbsent).toHaveBeenCalled();
+    const serials = firebaseService.createIfAbsent.mock.calls.map((c) => c[2].serial);
+    expect(serials).toContain('SN-BACK');
+  });
+
+  it('data-health repair releases serials left on already-voided bills', async () => {
+    storageService.saveInvoice({
+      id: 'Dubai__101', invoiceNo: '101', teamId: 'Dubai',
+      customer: { company: 'ACME' },
+      items: [{ name: 'W', imei: 'SN-OLDVOID' }],
+      status: 'final'
+    });
+    const all = JSON.parse(localStorage.getItem('crown_excel_invoices_v2'));
+    localStorage.setItem('crown_excel_invoices_v2', JSON.stringify(all.map((r) => (
+      r.id === 'Dubai__101' ? { ...r, deleted: true, deleteReason: 'legacy void' } : r
+    ))));
+    storageService._serialsCache = [
+      { id: 'SN-OLDVOID', serial: 'SN-OLDVOID', invoiceNo: '101', teamId: 'Dubai', customer: { company: 'ACME', name: 'ACME' } }
+    ];
+    const report = await storageService.runDataHealthCheck({ includeCloudCounts: false });
+    expect(report.findings.find((f) => f.key === 'voidedSerials').severity).toBe('error');
+    const r = await storageService.repairMissingRegistrations();
+    expect(r.released).toBe(1);
+    expect(storageService.findSerial('SN-OLDVOID')).toBeNull();
+  });
+});
+
+// Company is the only required partner field here, so most partners have an empty `name`. Serials
+// store `name || company` (their rules demand a non-empty identifier) while invoices store the raw
+// record - comparing those two directly marked every company-only partner as permanently
+// "renamed", which is hundreds of false alarms and a Repair that rewrites them all for nothing.
+describe('partner drift detection - company-only partners', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
+  });
+
+  const seedCompanyOnly = () => {
+    localStorage.setItem('crown_excel_customers_v2', JSON.stringify([
+      { id: 'c1', name: '', company: 'ACME', whatsapp: '', email: '', teamId: 'Dubai' }
+    ]));
+    localStorage.setItem('crown_excel_invoices_v2', JSON.stringify([{
+      id: 'Dubai__1', invoiceNo: '1', teamId: 'Dubai', status: 'final',
+      customer: { id: 'c1', name: '', company: 'ACME', whatsapp: '', email: '' },   // raw copy
+      items: [{ name: 'W', imei: 'S1', qty: 1 }]
+    }]));
+    // the serial stores the fallen-back name, as registerSerials writes it
+    storageService._serialsCache = [{
+      id: 'S1', serial: 'S1', teamId: 'Dubai',
+      customer: { id: 'c1', name: 'ACME', company: 'ACME', whatsapp: '', email: '' }
+    }];
+  };
+
+  it('does NOT report a company-only partner as drifted', () => {
+    seedCompanyOnly();
+    expect(storageService._partnersWithStaleCopies()).toEqual([]);
+    storageService._serialsCache = [];
+  });
+
+  it('still reports a genuine rename', () => {
+    seedCompanyOnly();
+    localStorage.setItem('crown_excel_customers_v2', JSON.stringify([
+      { id: 'c1', name: '', company: 'ACME TRADING', whatsapp: '', email: '', teamId: 'Dubai' }
+    ]));
+    const stale = storageService._partnersWithStaleCopies();
+    expect(stale).toHaveLength(1);
+    expect(stale[0].company).toBe('ACME TRADING');
+    storageService._serialsCache = [];
+  });
+
+  // The Excel partner import calls saveCustomer per duplicate row under the "update" policy. Without
+  // a no-op guard that sweeps every invoice and every cached serial once per row.
+  it('saving an unchanged partner writes nothing', () => {
+    seedCompanyOnly();
+    const before = localStorage.getItem('crown_excel_invoices_v2');
+    vi.clearAllMocks();
+
+    storageService.saveCustomer({ id: 'c1', name: '', company: 'ACME', whatsapp: '', email: '', teamId: 'Dubai' });
+
+    expect(localStorage.getItem('crown_excel_invoices_v2')).toBe(before);      // invoice untouched
+    expect(firebaseService.updateDocStrict).not.toHaveBeenCalled();            // no serial writes
+    storageService._serialsCache = [];
+  });
+
+  it('a real rename does reach both the invoice and the serial', () => {
+    seedCompanyOnly();
+    // The serial cloud-patch is skipped when Firebase isn't up, so turn it on to cover that path.
+    firebaseService.isInitialized = true;
+    try {
+      storageService.saveCustomer({ id: 'c1', name: '', company: 'ACME TRADING', whatsapp: '', email: '', teamId: 'Dubai' });
+
+      const inv = JSON.parse(localStorage.getItem('crown_excel_invoices_v2'))[0];
+      expect(inv.customer.company).toBe('ACME TRADING');
+      expect(storageService._serialsCache[0].customer.company).toBe('ACME TRADING');
+      expect(firebaseService.updateDocStrict).toHaveBeenCalledWith(
+        'serials', 'S1', expect.objectContaining({ customer: expect.objectContaining({ company: 'ACME TRADING' }) })
+      );
+    } finally {
+      firebaseService.isInitialized = false;
+      storageService._serialsCache = [];
+    }
+  });
+});
+
+describe('voiding reports failure honestly', () => {
+  it('returns ok:false when there is no such invoice to void', async () => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'a@b.com', role: 'admin', locationId: 'loc-1' });
+    const res = await storageService.deleteInvoice('does-not-exist', 'nope');
+    expect(res.ok).toBe(false);
+  });
+});

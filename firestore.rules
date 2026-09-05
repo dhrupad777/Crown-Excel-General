@@ -8,9 +8,10 @@ rules_version = '2';
 //
 // TEAM ISOLATION: each staff member belongs to a team (their `locationId`). products / customers /
 // invoices are readable and writable only within the caller's own team; admins see and manage every
-// team. Serials are the one deliberate exception: their READ stays global so the create-only
+// team. Serials are the one deliberate exception: their READ stays global so the create-if-absent
 // duplicate transaction can still guarantee one physical unit is registered once across the whole
 // business (a serial = a globally-unique device); creation is still pinned to the caller's team.
+// Admins may delete a serial when voiding a bill, so that unit can be sold again.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -100,12 +101,24 @@ service cloud.firestore {
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.updatedBy == callerEmail()
         && request.resource.data.updatedAt == request.time)
+        // Partner / billed-to corrections after the 24h window: only the customer snapshot
+        // (and the edit stamps) may change. Identity, serial, and provenance stay immutable.
+        || (isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['customer', 'updatedBy', 'updatedAt'])
+        && request.resource.data.serial == resource.data.serial
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.updatedBy == callerEmail()
+        && request.resource.data.updatedAt == request.time)
         // One-time team migration: an admin may stamp teamId onto a pre-team-model serial, touching
         // ONLY teamId. Harmless afterwards — it can only ever set teamId to a string.
         || (isAdmin()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teamId'])
         && request.resource.data.teamId is string);
-      allow delete: if false;
+      // Admin delete is the void-invoice path: the unit must be sellable again. Create-if-absent
+      // still guarantees a serial cannot exist twice at once.
+      allow delete: if isAdmin();
     }
 
     // ---------- Audit trail (append-only; admins read) ----------
