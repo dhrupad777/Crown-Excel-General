@@ -4,6 +4,7 @@
 
 import { storageService } from '../services/storage';
 import { normalizeSerial, SERIAL_MIN_LENGTH } from '../config/appConfig';
+import { loadExcelJS } from './lazyExcel';
 
 // Coerces one ExcelJS cell value to plain text. Cells aren't always primitives: formulas arrive
 // as { result }, styled text as { richText }, links as { hyperlink, text }.
@@ -101,8 +102,7 @@ export const parseWorkbookFile = async (file) => {
     return rowsToObjects(parseCsv(await file.text()));
   }
 
-  const mod = await import('exceljs');
-  const ExcelJS = mod.default || mod;
+  const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(await file.arrayBuffer());
 

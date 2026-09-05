@@ -5,6 +5,7 @@
 // an export, so it lands in its own chunk and never slows the app's initial load.
 
 import { downloadBlob } from './download';
+import { loadExcelJS } from './lazyExcel';
 
 const BRAND_FILL = 'FF2563EB';   // brand blue (ARGB)
 const HEADER_FONT = 'FFFFFFFF';  // white
@@ -40,8 +41,7 @@ const autoWidth = (header, rows, colIndex) => {
  * empty cells inherit it, so values typed into a blank template later stay text too.
  */
 export const writeStyledWorkbook = async ({ filename, title, subtitle, sheets }) => {
-  const mod = await import('exceljs');
-  const ExcelJS = mod.default || mod;
+  const ExcelJS = await loadExcelJS();
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Crown Excel Electronics';
