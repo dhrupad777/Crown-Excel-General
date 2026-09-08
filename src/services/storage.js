@@ -677,6 +677,29 @@ class StorageService {
     };
   }
 
+  // Finds registry entries left pointing at the WRONG customer after an invoice was corrected to a
+  // different one entirely (an admin fixing "wrong customer attached", not a partner being renamed).
+  // This is invisible to _partnersWithStaleCopies: nothing about the original customer's own record
+  // looks wrong — the bill just moved to someone else's name and the serial was never told. Matches
+  // a serial to its CURRENT invoice the same way _serialIdsTiedToInvoice does (case-insensitive
+  // invoiceNo, team-scoped), then compares customer identity, not just the displayed text.
+  _serialsWithStaleInvoiceCustomer() {
+    const byKey = new Map();
+    for (const inv of this.getInvoices()) {
+      const num = String(inv.invoiceNo || inv.id || '').trim().toLowerCase();
+      if (num) byKey.set(`${inv.teamId || ''}|${num}`, inv);
+    }
+    const stale = [];
+    for (const s of this._serialsCache) {
+      const num = String(s.invoiceNo || '').trim().toLowerCase();
+      if (!num || !s.customer?.id) continue;
+      const inv = byKey.get(`${s.teamId || ''}|${num}`);
+      if (!inv?.customer?.id || inv.customer.id === s.customer.id) continue;
+      stale.push({ id: s.id || s.serial, invoiceNo: inv.invoiceNo || inv.id, from: s.customer, to: inv.customer });
+    }
+    return stale;
+  }
+
   // Rewrites the copied partner on every invoice (incl. voided) and serial that still points at
   // this partner id. Local first; serial cloud writes are admin-only and best-effort.
   _propagatePartnerChange(partner) {
@@ -1343,6 +1366,23 @@ class StorageService {
       repairLabel: 'Sync names'
     });
 
+    const staleInvoiceCustomers = this._serialsWithStaleInvoiceCustomer();
+    findings.push({
+      key: 'invoiceCustomerDrift',
+      title: 'Invoice reassigned, registry not updated',
+      severity: staleInvoiceCustomers.length > 0 ? 'error' : 'ok',
+      summary: staleInvoiceCustomers.length > 0
+        ? `${staleInvoiceCustomers.length} serial(s) still show the customer an invoice was corrected away from`
+        : 'Every registered serial matches its invoice’s current customer',
+      items: staleInvoiceCustomers.slice(0, 200).map((d) => ({
+        id: d.id,
+        label: `${d.id} on ${d.invoiceNo} → still shows ${d.from?.company || d.from?.name || 'an old customer'}`
+      })),
+      itemNoun: 'serial',
+      repair: staleInvoiceCustomers.length > 0 ? 'registerMissingSerials' : null,
+      repairLabel: 'Sync to invoice'
+    });
+
     // 2. Missing / unknown region — these records are invisible to every store user.
     const badTeam = (r) => !String(r.teamId || '').trim() || !validTeams.has(r.teamId);
     const untagged = [
@@ -1465,7 +1505,7 @@ class StorageService {
 
   // Repairs every under-registered bill in one pass (the Data Health "warranty" repair).
   async repairMissingRegistrations() {
-    const totals = { invoices: 0, registered: 0, duplicates: 0, failed: 0, released: 0, partnersSynced: 0 };
+    const totals = { invoices: 0, registered: 0, duplicates: 0, failed: 0, released: 0, partnersSynced: 0, invoiceCustomersSynced: 0 };
     for (const inv of this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted)) {
       const r = await this.releaseSerialsForInvoice(inv);
       totals.released += r.released.length;
@@ -1474,6 +1514,14 @@ class StorageService {
     for (const partner of this._partnersWithStaleCopies()) {
       this._propagatePartnerChange(partner);
       totals.partnersSynced += 1;
+    }
+    for (const drift of this._serialsWithStaleInvoiceCustomer()) {
+      this._patchSerialsCustomer(
+        (s) => (s.id || s.serial) === drift.id,
+        this._customerSnapshot(drift.to),
+        { reason: 'invoiceCustomerDrift.repair', invoiceNo: drift.invoiceNo }
+      );
+      totals.invoiceCustomersSynced += 1;
     }
     const registered = new Set(this.getSerials().map((s) => normalizeSerial(s.serial || s.id)));
     for (const inv of this.getInvoices()) {

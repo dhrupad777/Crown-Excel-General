@@ -887,6 +887,64 @@ describe('partner drift detection - company-only partners', () => {
   });
 });
 
+// Real incident: an invoice was billed to the wrong customer, corrected the same day (editReason
+// "Wrong customer attached"), but the registry kept showing the customer it was corrected AWAY
+// from. _partnersWithStaleCopies could never see this — the original customer's own record was
+// never touched, so nothing about it looks stale. This is a different shape of drift: the invoice
+// was reassigned to a DIFFERENT customer id entirely.
+describe('invoice reassigned to a different customer — registry drift', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'admin@b.com', role: 'admin', locationId: 'loc-1' });
+  });
+
+  const seedReassigned = () => {
+    storageService.saveInvoice({
+      id: 'Dubai__NI-1', invoiceNo: 'NI-1', teamId: 'Dubai',
+      customer: { id: 'cust-right', company: 'RIGHT CO', name: 'RIGHT CO' },
+      items: [{ name: 'W', imei: 'SN-REASSIGN' }],
+      status: 'final'
+    });
+    storageService._serialsCache = [
+      { id: 'SN-REASSIGN', serial: 'SN-REASSIGN', invoiceNo: 'NI-1', teamId: 'Dubai',
+        customer: { id: 'cust-wrong', company: 'WRONG CO', name: 'WRONG CO' } },
+      { id: 'SN-UNRELATED', serial: 'SN-UNRELATED', invoiceNo: 'NI-2', teamId: 'Dubai',
+        customer: { id: 'cust-other', company: 'OTHER', name: 'OTHER' } }
+    ];
+  };
+
+  it('flags a serial whose customer id no longer matches its invoice, and only that one', () => {
+    seedReassigned();
+    const stale = storageService._serialsWithStaleInvoiceCustomer();
+    expect(stale).toHaveLength(1);
+    expect(stale[0]).toMatchObject({ id: 'SN-REASSIGN', invoiceNo: 'NI-1' });
+    expect(stale[0].to.company).toBe('RIGHT CO');
+  });
+
+  it('does not flag it once the customer ids already match', () => {
+    seedReassigned();
+    storageService._serialsCache[0].customer = { id: 'cust-right', company: 'RIGHT CO', name: 'RIGHT CO' };
+    expect(storageService._serialsWithStaleInvoiceCustomer()).toEqual([]);
+  });
+
+  it('Data Health reports it as an error, not a warning — this is factually wrong, not cosmetic', async () => {
+    seedReassigned();
+    const report = await storageService.runDataHealthCheck({ includeCloudCounts: false });
+    const finding = report.findings.find((f) => f.key === 'invoiceCustomerDrift');
+    expect(finding.severity).toBe('error');
+    expect(finding.items[0].id).toBe('SN-REASSIGN');
+  });
+
+  it('the repair syncs the serial to the invoice’s current customer and leaves others alone', async () => {
+    seedReassigned();
+    const r = await storageService.repairMissingRegistrations();
+    expect(r.invoiceCustomersSynced).toBe(1);
+    expect(storageService.findSerial('SN-REASSIGN').customer).toMatchObject({ id: 'cust-right', company: 'RIGHT CO' });
+    expect(storageService.findSerial('SN-UNRELATED').customer.company).toBe('OTHER');
+    expect(storageService._serialsWithStaleInvoiceCustomer()).toEqual([]);
+  });
+});
+
 describe('voiding reports failure honestly', () => {
   it('returns ok:false when there is no such invoice to void', async () => {
     localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));

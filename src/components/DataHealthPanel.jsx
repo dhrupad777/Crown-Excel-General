@@ -39,7 +39,7 @@ export const DataHealthPanel = () => {
     try {
       if (kind === 'registerMissingSerials') {
         const r = await storageService.repairMissingRegistrations();
-        setRepairMsg(`Repaired ${r.invoices} bill(s): ${r.registered} registered, ${r.duplicates} already on record${r.released ? `, ${r.released} serials released from voided bills` : ''}${r.partnersSynced ? `, ${r.partnersSynced} partner name(s) synced` : ''}${r.failed ? `, ${r.failed} failed` : ''}.`);
+        setRepairMsg(`Repaired ${r.invoices} bill(s): ${r.registered} registered, ${r.duplicates} already on record${r.released ? `, ${r.released} serials released from voided bills` : ''}${r.partnersSynced ? `, ${r.partnersSynced} partner name(s) synced` : ''}${r.invoiceCustomersSynced ? `, ${r.invoiceCustomersSynced} serial(s) synced to their invoice's corrected customer` : ''}${r.failed ? `, ${r.failed} failed` : ''}.`);
       }
       if (kind === 'retryPending') {
         const r = await storageService.retryPendingWrites();
