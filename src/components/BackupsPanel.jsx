@@ -65,7 +65,7 @@ export const BackupsPanel = () => {
   };
 
   const countLine = (c) => c
-    ? `${c.products ?? 0} products · ${c.customers ?? 0} partners · ${c.invoices ?? 0} invoices · ${c.serials ?? 0} serials`
+    ? `${c.products ?? 0} products · ${c.customers ?? 0} partners · ${c.invoices ?? 0} invoices · ${c.rmaCases ?? 0} RMA · ${c.serials ?? 0} serials`
     : '';
 
   return (
@@ -76,7 +76,7 @@ export const BackupsPanel = () => {
           <div>
             <h3 className="font-heading font-black text-sm text-slate-900 uppercase tracking-wider">Backups</h3>
             <p className="text-[11px] font-semibold text-slate-500 mt-0.5">
-              Full snapshots (products, partners, invoices, serials, staff, stores) kept on this device. Download as Excel to read, or JSON to restore.
+              Full snapshots (products, partners, invoices, RMA, serials, staff, stores) kept on this device. Download as Excel to read, or JSON to restore.
             </p>
           </div>
         </div>

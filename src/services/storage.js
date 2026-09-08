@@ -4,6 +4,7 @@
 
 import { firebaseService, serverTimestamp } from './firebase';
 import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS, normalizePermissions } from '../config/appConfig';
+import { RMA_STATUS_KEYS, DEFAULT_RMA_STATUS, isRmaOpen } from '../config/rma';
 import { idbPutBundle, idbGetBundle, idbDeleteBundle } from '../utils/backupStore';
 
 const STORAGE_KEYS = {
@@ -14,6 +15,7 @@ const STORAGE_KEYS = {
   INVOICE_COUNTER: 'crown_excel_invoice_counter_v2',
   STAFF: 'crown_excel_staff_v2',
   LOCATIONS: 'crown_excel_locations_v2',
+  RMA: 'crown_excel_rma_v2',
   DEVICE_ID: 'crown_excel_device_id_v2',
   // Writes saved locally but not yet confirmed by the cloud, plus permanently-failed ones.
   // Durable on purpose: these must outlive a refresh, or an unconfirmed record is lost silently.
@@ -124,9 +126,18 @@ class StorageService {
       if (!text(record?.teamId)) problems.push('region (team) is required');
       if (typeof record?.locationId !== 'string') problems.push('locationId must be a string');
     }
+    if (collection === 'rmaCases') {
+      if (!text(record?.rmaNo)) problems.push('RMA number is required');
+      if (text(record?.rmaNo).length > 60) problems.push('RMA number is too long (max 60)');
+      if (!RMA_STATUS_KEYS.includes(record?.status)) problems.push('an unknown status would hide the case from every filter');
+      if (!Array.isArray(record?.timeline)) problems.push('the case log must be a list');
+      if (!text(record?.teamId)) problems.push('region (team) is required — the case would be invisible to every store');
+    }
 
     if (problems.length) {
-      throw new Error(`Cannot save this ${collection.replace(/s$/, '')}: ${problems.join('; ')}.`);
+      // 'rmaCases' would otherwise read as "this rmaCase" in front of an operator.
+      const label = collection === 'rmaCases' ? 'RMA case' : collection.replace(/s$/, '');
+      throw new Error(`Cannot save this ${label}: ${problems.join('; ')}.`);
     }
     return true;
   }
@@ -228,6 +239,11 @@ class StorageService {
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
     }, team);
 
+    firebaseService.subscribeToCollection('rmaCases', (cloudCases) => {
+      this._setItem(STORAGE_KEYS.RMA, this._mergePending('rmaCases', cloudCases || []));
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'rmaCases' } }));
+    }, team);
+
     // Serial Registrations — kept IN MEMORY (a busy registry would blow the localStorage quota).
     // Also team-scoped for display; the doc id stays the bare serial so the create-only transaction
     // still guarantees one physical unit is registered once across the whole business.
@@ -280,6 +296,7 @@ class StorageService {
       STORAGE_KEYS.PRODUCTS,
       STORAGE_KEYS.CUSTOMERS,
       STORAGE_KEYS.INVOICES,
+      STORAGE_KEYS.RMA,
       STORAGE_KEYS.STAFF
       // NOT locations: _currentTeamId() resolves the caller's region THROUGH the location list, and
       // login does not re-fetch it before subscribing. Clearing it here would leave the next sign-in
@@ -489,7 +506,12 @@ class StorageService {
   // --- SOFT DELETE / ARCHIVE / RESTORE / PURGE (so nothing is ever lost by accident) ---
 
   _collectionKey(collection) {
-    return { products: STORAGE_KEYS.PRODUCTS, customers: STORAGE_KEYS.CUSTOMERS, invoices: STORAGE_KEYS.INVOICES }[collection];
+    return {
+      products: STORAGE_KEYS.PRODUCTS,
+      customers: STORAGE_KEYS.CUSTOMERS,
+      invoices: STORAGE_KEYS.INVOICES,
+      rmaCases: STORAGE_KEYS.RMA
+    }[collection];
   }
 
   // Flags a record as archived (recoverable) instead of destroying it. It vanishes from every
@@ -519,7 +541,8 @@ class StorageService {
     return {
       products: this.getArchivedProducts(),
       customers: this._readRaw(STORAGE_KEYS.CUSTOMERS).filter((c) => c.deleted),
-      invoices: this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted)
+      invoices: this._readRaw(STORAGE_KEYS.INVOICES).filter((i) => i.deleted),
+      rmaCases: this._readRaw(STORAGE_KEYS.RMA).filter((c) => c.deleted)
     };
   }
 
@@ -553,7 +576,7 @@ class StorageService {
     if (this._currentUser?.role !== 'admin') return 0;
     const cutoff = Date.now() - DELETION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
     let purged = 0;
-    ['products', 'customers', 'invoices'].forEach((collection) => {
+    ['products', 'customers', 'invoices', 'rmaCases'].forEach((collection) => {
       const key = this._collectionKey(collection);
       const all = this._readRaw(key);
       const isExpired = (r) => r.deleted && r.deletedAt && new Date(r.deletedAt).getTime() < cutoff;
@@ -676,6 +699,23 @@ class StorageService {
     });
     if (invoicesChanged && this._setItem(STORAGE_KEYS.INVOICES, nextInvoices)) {
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+    }
+
+    // RMA cases carry the partner name too. Same reason as above: a renamed partner that still
+    // reads as the old name on a warranty case is the exact complaint that started this work.
+    const cases = this._readRaw(STORAGE_KEYS.RMA);
+    let casesChanged = false;
+    const nextCases = cases.map((c) => {
+      if (c.customerId !== partner.id) return c;
+      const name = snapshot.company || snapshot.name;
+      if (String(c.partnerName || '') === String(name || '')) return c;
+      casesChanged = true;
+      const updated = { ...c, partnerName: name };
+      this._syncInBackground('rmaCases', updated.id, updated);
+      return updated;
+    });
+    if (casesChanged && this._setItem(STORAGE_KEYS.RMA, nextCases)) {
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'rmaCases' } }));
     }
 
     this._patchSerialsCustomer(
@@ -1309,7 +1349,8 @@ class StorageService {
       ...products.filter(badTeam).map((r) => ({ collection: 'products', id: r.id, label: r.name, teamId: r.teamId || '' })),
       ...customers.filter(badTeam).map((r) => ({ collection: 'customers', id: r.id, label: r.company || r.name, teamId: r.teamId || '' })),
       ...invoices.filter(badTeam).map((r) => ({ collection: 'invoices', id: r.id, label: r.invoiceNo || r.id, teamId: r.teamId || '' })),
-      ...serials.filter(badTeam).map((r) => ({ collection: 'serials', id: r.id, label: r.serial, teamId: r.teamId || '' }))
+      ...serials.filter(badTeam).map((r) => ({ collection: 'serials', id: r.id, label: r.serial, teamId: r.teamId || '' })),
+      ...this.getRmaCases().filter(badTeam).map((r) => ({ collection: 'rmaCases', id: r.id, label: r.rmaNo || r.id, teamId: r.teamId || '' }))
     ];
     findings.push({
       key: 'region',
@@ -1683,6 +1724,146 @@ class StorageService {
     return totals;
   }
 
+  // --- RMA CASES (warranty returns tracker) ------------------------------------------
+  // Replaces the client's 27-column Excel sheet. Team-scoped like every other business
+  // collection; the registry is what links a case back to the sale that produced it.
+
+  getRmaCases() {
+    return this._readRaw(STORAGE_KEYS.RMA)
+      .filter((c) => !c.deleted)
+      .sort((a, b) => new Date(b.receivedDate || b.date || 0) - new Date(a.receivedDate || a.date || 0));
+  }
+
+  getRmaCase(id) {
+    return this.getRmaCases().find((c) => c.id === id) || null;
+  }
+
+  // Hands out the next case number as RMA-YYYY-MM-NNN, resetting each month — the numbering the
+  // client already uses, except theirs was typed as "04-07-2026" and Excel silently stored it as a
+  // DATE, so two cases in the sample file share one number.
+  //
+  // The sequence is deliberately GLOBAL rather than per-region: returns are handled centrally off a
+  // single sheet today, and one shared run of numbers is what makes a case referable in an email.
+  async reserveRmaNumber(when = new Date()) {
+    const period = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, '0')}`;
+    const prefix = `RMA-${period}-`;
+    // Seed the shared counter from the highest number this terminal has seen for the month, so the
+    // first cloud allocation can't land on top of a case numbered before the counter existed.
+    const floor = this._readRaw(STORAGE_KEYS.RMA).reduce((max, c) => {
+      const n = String(c.rmaNo || '').startsWith(prefix)
+        ? parseInt(String(c.rmaNo).slice(prefix.length), 10)
+        : NaN;
+      return Number.isFinite(n) && n > max ? n : max;
+    }, 0);
+
+    const allocated = await firebaseService.allocateSequentialNumber(`rma-${period}`, floor);
+    if (Number.isFinite(allocated)) return `${prefix}${String(allocated).padStart(3, '0')}`;
+    // Offline: transactions can't run. Number it locally and tag the device, so the number is still
+    // unique when the write syncs — the same fallback finalized bills use.
+    return `${prefix}${String(floor + 1).padStart(3, '0')}-${this._deviceId()}`;
+  }
+
+  // See saveProduct for the `confirm` contract.
+  saveRmaCase(rmaCase, { confirm = false } = {}) {
+    const cases = this._readRawSafe(STORAGE_KEYS.RMA);
+    const isNew = !rmaCase.id || !cases.some((c) => c.id === rmaCase.id);
+    const existing = isNew ? null : cases.find((c) => c.id === rmaCase.id);
+    const user = this._currentUser || {};
+
+    const saved = {
+      ...rmaCase,
+      id: rmaCase.id || this._newId('rma'),
+      status: rmaCase.status || DEFAULT_RMA_STATUS,
+      serials: (rmaCase.serials || []).map((s) => normalizeSerial(s)).filter(Boolean),
+      timeline: Array.isArray(rmaCase.timeline) ? rmaCase.timeline : [],
+      date: rmaCase.date || existing?.date || new Date().toISOString(),
+      // Owning team. Preserved on edit so an admin editing another region's case can't reassign it.
+      teamId: rmaCase.teamId || existing?.teamId || this._currentTeamId(),
+      createdBy: existing?.createdBy || rmaCase.createdBy || user.email || '',
+      createdByName: existing?.createdByName || rmaCase.createdByName || user.displayName || '',
+      updatedAt: new Date().toISOString(),
+      updatedBy: user.email || ''
+    };
+
+    this.validateRecord('rmaCases', saved);
+
+    const updated = isNew ? [saved, ...cases] : cases.map((c) => (c.id === saved.id ? saved : c));
+    if (!this._setItem(STORAGE_KEYS.RMA, updated)) return null;
+    window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'rmaCases' } }));
+
+    this.appendAudit(isNew ? 'rma.create' : 'rma.update', existing || null, saved,
+      { entity: 'rmaCase', entityId: saved.id });
+
+    if (confirm) {
+      return firebaseService.saveToCloudStrict('rmaCases', saved.id, saved).then(() => saved);
+    }
+    this._syncInBackground('rmaCases', saved.id, saved);
+    return saved;
+  }
+
+  deleteRmaCase(id, reason = '') {
+    return this._archive(STORAGE_KEYS.RMA, 'rmaCases', id, reason);
+  }
+
+  // Appends one dated entry to a case's log. The client's sheet kept two parallel logs (customer-
+  // facing and internal) that had already drifted apart; here it is one list and `internal` is a
+  // flag, so the same event is never typed twice. Entries are never edited or removed.
+  appendRmaEntry(id, { text, internal = false, date, status } = {}) {
+    const body = String(text || '').trim();
+    if (!body) throw new Error('A log entry needs some text.');
+    const rmaCase = this.getRmaCase(id);
+    if (!rmaCase) throw new Error('That RMA case no longer exists.');
+
+    const user = this._currentUser || {};
+    const entry = {
+      id: this._newId('rmalog'),
+      date: date || new Date().toISOString(),
+      text: body,
+      internal: Boolean(internal),
+      by: user.email || '',
+      byName: user.displayName || ''
+    };
+
+    return this.saveRmaCase({
+      ...rmaCase,
+      status: status && RMA_STATUS_KEYS.includes(status) ? status : rmaCase.status,
+      timeline: [...(rmaCase.timeline || []), entry]
+    }, { confirm: true });
+  }
+
+  // Given a serial, pull everything the sale already knows so nobody retypes it. Uses checkSerials
+  // rather than findSerial because that one reaches the CLOUD: a non-admin's mirror only holds
+  // their own region, and a unit registered by another store must still resolve here.
+  // Returns null when the serial was never registered — that is normal (marketplace returns), not
+  // an error, and the caller keeps every field typeable.
+  async resolveRmaFromSerial(serial) {
+    const id = normalizeSerial(serial);
+    if (!id) return null;
+    let record = this.findSerial(id);
+    if (!record) {
+      try {
+        const { rows } = await this.checkSerials([id]);
+        record = rows?.[0]?.record || null;
+      } catch { return null; }
+    }
+    if (!record) return null;
+
+    const partnerName = String(record.customer?.company || '').trim()
+      || String(record.customer?.name || '').trim();
+    return {
+      productId: record.productId || '',
+      productName: record.productName || '',
+      productSku: record.sku || '',
+      partnerName,
+      customerId: record.customer?.id || '',
+      customerPhone: record.customer?.whatsapp || '',
+      saleInvoiceNo: record.invoiceNo || '',
+      saleDate: record.date || '',
+      soldFromTeam: record.teamId || '',
+      soldFromLocation: record.locationName || ''
+    };
+  }
+
   // --- STAFF & LOCATIONS (admin-managed masters) ---
 
   getStaff() {
@@ -1891,7 +2072,10 @@ class StorageService {
       totalItemsSold,
       openQueries,
       draftsCount: drafts.length,
-      expiredDrafts
+      expiredDrafts,
+      // Warranty returns still waiting on someone — the tracker is a to-do list, so the nav badge
+      // counts open cases rather than the total.
+      rmaOpenCount: this.getRmaCases().filter(isRmaOpen).length
     };
   }
 
@@ -1944,7 +2128,7 @@ class StorageService {
   // mirror, which for an admin holds every team's data. Returns { [team]: {products, customers,
   // invoices, serials} }.
   getTeamDataCounts() {
-    const blank = () => ({ products: 0, customers: 0, invoices: 0, serials: 0 });
+    const blank = () => ({ products: 0, customers: 0, invoices: 0, serials: 0, rmaCases: 0 });
     const out = {};
     const bump = (team, key) => {
       const t = team || '';
@@ -1955,6 +2139,7 @@ class StorageService {
     this.getCustomers().forEach(c => bump(c.teamId, 'customers'));
     this.getInvoices().forEach(i => bump(i.teamId, 'invoices'));
     this.getSerials().forEach(s => bump(s.teamId, 'serials'));
+    this.getRmaCases().forEach(c => bump(c.teamId, 'rmaCases'));
     return out;
   }
 
@@ -1968,8 +2153,8 @@ class StorageService {
     const to = String(newName || '').trim();
     if (!from) throw new Error('Missing the region to rename.');
     if (!to) throw new Error('Enter the new region name.');
-    if (from === to) return { unchanged: true, locations: 0, products: 0, customers: 0, invoices: 0, serials: 0, serialsFailed: 0 };
-    const report = { locations: 0, products: 0, customers: 0, invoices: 0, serials: 0, serialsFailed: 0 };
+    if (from === to) return { unchanged: true, locations: 0, products: 0, customers: 0, invoices: 0, rmaCases: 0, serials: 0, serialsFailed: 0 };
+    const report = { locations: 0, products: 0, customers: 0, invoices: 0, rmaCases: 0, serials: 0, serialsFailed: 0 };
 
     // 1. Stores (saveLocation mirrors + syncs each).
     for (const loc of this.getLocations()) {
@@ -1993,6 +2178,7 @@ class StorageService {
     report.products = restamp(STORAGE_KEYS.PRODUCTS, 'products');
     report.customers = restamp(STORAGE_KEYS.CUSTOMERS, 'customers');
     report.invoices = restamp(STORAGE_KEYS.INVOICES, 'invoices');
+    report.rmaCases = restamp(STORAGE_KEYS.RMA, 'rmaCases');
 
     // 3. Serials are create-only; teamId is changed via the admin update path (rules migration
     // exception permits touching ONLY teamId). Sequential + awaited so a failure is counted.
@@ -2022,6 +2208,7 @@ class StorageService {
         products: this.getProducts().length,
         customers: this.getCustomers().length,
         invoices: this.getInvoices().length,
+        rmaCases: this.getRmaCases().length,
         serials: this.getSerials().length,
         staff: this.getStaff().length,
         locations: this.getLocations().length
@@ -2029,6 +2216,7 @@ class StorageService {
       products: this._readRaw(STORAGE_KEYS.PRODUCTS),
       customers: this._readRaw(STORAGE_KEYS.CUSTOMERS),
       invoices: this._readRaw(STORAGE_KEYS.INVOICES),
+      rmaCases: this._readRaw(STORAGE_KEYS.RMA),
       serials: this.getSerials(),
       staff: this.getStaff(),
       locations: this.getLocations()
@@ -2101,7 +2289,7 @@ class StorageService {
     window.dispatchEvent(new CustomEvent('crown-backup-change'));
   }
 
-  // Restores products/customers/invoices only. Serial registrations are deliberately NOT
+  // Restores products/customers/invoices/rmaCases. Serial registrations are deliberately NOT
   // restored from a backup: the serials collection is create-only by security rule (that is the
   // duplicate guarantee), so re-imports would be rejected — Firestore itself is the registry's
   // single source of truth. Staff/locations are likewise managed live via the Admin tab.
@@ -2119,6 +2307,10 @@ class StorageService {
       if (data.invoices) {
         if (!this._setItem(STORAGE_KEYS.INVOICES, data.invoices)) return false;
         data.invoices.forEach(inv => firebaseService.saveToCloud('invoices', inv.id, inv));
+      }
+      if (data.rmaCases) {
+        if (!this._setItem(STORAGE_KEYS.RMA, data.rmaCases)) return false;
+        data.rmaCases.forEach(c => firebaseService.saveToCloud('rmaCases', c.id, c));
       }
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'all' } }));
       return true;

@@ -21,6 +21,7 @@ import { SerialCapture } from './pages/SerialCapture';
 import { SerialRegistry } from './pages/SerialRegistry';
 import { RegistrationsDashboard } from './pages/RegistrationsDashboard';
 import { AdminPage } from './pages/AdminPage';
+import { RmaTracker } from './pages/RmaTracker';
 import { storageService } from './services/storage';
 import { firebaseService } from './services/firebase';
 import { runWeeklySnapshotIfDue } from './utils/backup';
@@ -216,6 +217,9 @@ export function App() {
         )}
         {activeTab === 'dashboard' && can('analytics') && (
           <RegistrationsDashboard onViewInvoice={handleViewInvoice} />
+        )}
+        {activeTab === 'rma' && can('rmaView') && (
+          <RmaTracker />
         )}
         {activeTab === 'admin' && isAdmin && (
           <AdminPage />

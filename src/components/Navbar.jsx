@@ -17,7 +17,8 @@ import {
   UserCog,
   LogOut,
   AlertTriangle,
-  FileEdit
+  FileEdit,
+  Wrench
 } from 'lucide-react';
 import { audioService } from '../services/audio';
 import { storageService } from '../services/storage';
@@ -115,6 +116,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
         { id: 'serials', label: 'Serial Capture', icon: ScanLine },
         { id: 'registry', label: 'Serial Registry', icon: ShieldCheck, count: stats.serialsCount },
         { id: 'dashboard', label: 'Dashboard', icon: BarChart3, alert: stats.openQueries },
+        { id: 'rma', label: 'RMA Tracker', icon: Wrench, count: stats.rmaOpenCount },
       ])
     },
     ...(isAdmin ? [{
@@ -138,6 +140,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       case 'serials': return 'Serial Number Capture';
       case 'registry': return 'Serial Registry & Warranty Search';
       case 'dashboard': return 'Registrations Dashboard';
+      case 'rma': return 'RMA Tracker';
       case 'admin': return 'Staff, Locations & Audit Trail';
       default: return 'Enterprise Dashboard';
     }
@@ -427,7 +430,7 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
                 }`}
               >
                 <Icon className={`w-5 h-5 ${isActive ? 'text-[#2563eb]' : 'text-slate-400'}`} />
-                <span className="whitespace-nowrap">{item.label.replace('Invoices Archive', 'Invoices').replace('Products & IMEIs', 'Products').replace('Customers CRM', 'Customers').replace('Staff & Locations', 'Admin')}</span>
+                <span className="whitespace-nowrap">{item.label.replace('Invoices Archive', 'Invoices').replace('Products & IMEIs', 'Products').replace('Customers CRM', 'Customers').replace('Staff & Locations', 'Admin').replace('RMA Tracker', 'RMA')}</span>
               </button>
             );
           })}

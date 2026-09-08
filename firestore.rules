@@ -204,7 +204,24 @@ service cloud.firestore {
                            'appendedBy', 'appendedByName', 'finalizedBy', 'finalizedByName', 'finalizedAt']));
     }
 
-    // Shared sequence counters — legacy/unused (numbers are operator-entered per team now).
+    // Warranty returns (RMA). Team-scoped like the rest; case numbers come from counters/rma-YYYY-MM.
+    match /rmaCases/{id} {
+      allow read: if isAdmin() || ownTeam();
+      allow create: if isStaff() && textOk(request.resource.data.rmaNo, 60)
+                        && (isAdmin() || newOwnTeam());
+      allow delete: if isAdmin();
+      // Admin edits freely. Standard staff (once an admin grants them the RMA tab) may only PROGRESS
+      // a case — append to its log and move its status. They cannot rewrite who the unit belongs to,
+      // what it is, or which region owns it. Same shape as the invoice `query` exception above.
+      allow update: if isAdmin()
+        || (ownTeam()
+            && request.resource.data.teamId == resource.data.teamId
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['timeline', 'status', 'updatedAt', 'updatedBy']));
+    }
+
+    // Shared sequence counters — RMA case numbers (rma-YYYY-MM); the invoice counter is legacy,
+    // superseded by operator-entered numbers per team.
     match /counters/{id} {
       allow read: if isStaff();
       allow create: if isStaff() && request.resource.data.next is int;

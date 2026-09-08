@@ -112,7 +112,7 @@ describe('bundleToSheets', () => {
 
   it('produces one sheet per record type plus a summary and line items', () => {
     expect(bundleToSheets(BUNDLE).map((sh) => sh.name)).toEqual([
-      'Summary', 'Products', 'Partners', 'Invoices', 'Invoice Items', 'Serials', 'Staff', 'Stores'
+      'Summary', 'Products', 'Partners', 'Invoices', 'Invoice Items', 'Serials', 'RMA', 'Staff', 'Stores'
     ]);
   });
 
@@ -152,7 +152,7 @@ describe('bundleToSheets', () => {
 
   it('survives a completely empty bundle', () => {
     const sheets = bundleToSheets({});
-    expect(sheets).toHaveLength(8);
+    expect(sheets).toHaveLength(9);
     expect(sheets.every((sh) => Array.isArray(sh.rows))).toBe(true);
   });
 

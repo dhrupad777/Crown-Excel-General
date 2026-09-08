@@ -20,6 +20,7 @@ describe('data permission declarations', () => {
     expect(tabPermission('customers')).toBe('partnersView');
     expect(tabPermission('registry')).toBe('serialsView');
     expect(tabPermission('dashboard')).toBe('analytics');
+    expect(tabPermission('rma')).toBe('rmaView');
     // The tabs that are day-to-day work must never be gateable.
     for (const t of ['billing', 'drafts', 'products', 'serials']) {
       expect(tabPermission(t)).toBeNull();

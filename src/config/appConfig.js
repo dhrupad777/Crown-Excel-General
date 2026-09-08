@@ -59,6 +59,8 @@ export const DELETION_RETENTION_DAYS = 90;
 // the audit log, so misuse is detectable.
 //
 // Backups are deliberately absent: they stay admin-only, because one bundle holds every region.
+// RMA *is* here, granted to nobody, so it behaves as admin-only until someone is given it — the
+// people who actually run warranty returns are not admins, and that grant must not need a deploy.
 export const DATA_CATEGORIES = [
   {
     key: 'invoices',
@@ -94,6 +96,15 @@ export const DATA_CATEGORIES = [
     view: 'analytics',
     download: null,
     viewHint: 'See the Registrations Dashboard'
+  },
+  {
+    key: 'rma',
+    label: 'RMA',
+    tab: 'rma',
+    view: 'rmaView',
+    download: 'rmaExport',
+    viewHint: 'See the RMA Tracker (warranty returns)',
+    downloadHint: 'Download the RMA register as Excel'
   }
 ];
 

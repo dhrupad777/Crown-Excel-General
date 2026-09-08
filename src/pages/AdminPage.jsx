@@ -88,7 +88,7 @@ export const AdminPage = () => {
       if (!type || type === 'staff' || type === 'all') setStaffList(storageService.getStaff());
       if (!type || type === 'locations' || type === 'all') setLocations(storageService.getLocations());
       if (!type || type === 'invoices' || type === 'all') setInvoices(storageService.getInvoices());
-      if (!type || ['products', 'customers', 'invoices', 'all'].includes(type)) setArchived(storageService.getArchivedRecords());
+      if (!type || ['products', 'customers', 'invoices', 'rmaCases', 'all'].includes(type)) setArchived(storageService.getArchivedRecords());
     };
     window.addEventListener('crown-data-change', handleDataChange);
     return () => window.removeEventListener('crown-data-change', handleDataChange);
@@ -117,7 +117,8 @@ export const AdminPage = () => {
   const archivedList = [
     ...archived.products.map((r) => ({ collection: 'products', typeLabel: 'Product', id: r.id, label: r.name || r.id, sub: r.barcode ? `#${r.barcode}` : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
     ...archived.customers.map((r) => ({ collection: 'customers', typeLabel: 'Customer', id: r.id, label: r.name || r.id, sub: r.whatsapp || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
-    ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer ? customerPrimaryName(r.customer) : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
+    ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer ? customerPrimaryName(r.customer) : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
+    ...(archived.rmaCases || []).map((r) => ({ collection: 'rmaCases', typeLabel: 'RMA', id: r.id, label: r.rmaNo || r.id, sub: r.productName || r.partnerName || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
   ].sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
 
   const purgeDate = (deletedAt) =>
@@ -750,7 +751,7 @@ export const AdminPage = () => {
       {/* Archived (soft-deleted) records — recoverable until auto-purge. Nothing is ever lost by accident. */}
       <SectionCard
         title="Archived Records (Recycle Bin)"
-        subtitle={`Deleted products, customers and invoices are kept here for ${DELETION_RETENTION_DAYS} days and can be restored. After that an admin session purges them for good.`}
+        subtitle={`Deleted products, customers, invoices and RMA cases are kept here for ${DELETION_RETENTION_DAYS} days and can be restored. After that an admin session purges them for good.`}
         icon={Archive}
         accent="text-slate-600"
       >

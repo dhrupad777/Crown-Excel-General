@@ -5,6 +5,7 @@
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
 import { storageService } from '../services/storage';
+import { RMA_SHEET_HEADERS, RMA_SHEET_WIDTHS, RMA_TEXT_COLUMNS, rmaToSheetRow } from '../config/rma';
 
 const escapeXml = (s) =>
   String(s)
@@ -71,6 +72,7 @@ export const bundleToSheets = (bundle) => {
   const products = b.products || [];
   const customers = b.customers || [];
   const invoices = b.invoices || [];
+  const rmaCases = b.rmaCases || [];
   const serials = b.serials || [];
   const staff = b.staff || [];
   const locations = b.locations || [];
@@ -107,6 +109,7 @@ export const bundleToSheets = (bundle) => {
         ['Partners', customers.length],
         ['Invoices', invoices.length],
         ['Invoice line items', lineItems.length],
+        ['RMA cases', rmaCases.length],
         ['Registered serials', serials.length],
         ['Staff', staff.length],
         ['Stores', locations.length],
@@ -170,6 +173,13 @@ export const bundleToSheets = (bundle) => {
         s.source || '', s.remarks || ''
       ]),
       textColumns: [0, 2, 3, 6]
+    },
+    {
+      name: 'RMA',
+      headers: [...RMA_SHEET_HEADERS, 'Record Status', 'Region'],
+      rows: rmaCases.map((c) => [...rmaToSheetRow(c), liveOrArchived(c), c.teamId || '']),
+      colWidths: [...RMA_SHEET_WIDTHS, 14, 14],
+      textColumns: RMA_TEXT_COLUMNS
     },
     {
       name: 'Staff',

@@ -4,6 +4,9 @@
 
 import { storageService } from '../services/storage';
 import { normalizeSerial, SERIAL_MIN_LENGTH } from '../config/appConfig';
+import {
+  RMA_SHEET_COLUMNS, RMA_STATUSES, DEFAULT_RMA_STATUS, parseRmaDate, rmaDisplayDate, parseRmaLogCell
+} from '../config/rma';
 import { loadExcelJS } from './lazyExcel';
 
 // Coerces one ExcelJS cell value to plain text. Cells aren't always primitives: formulas arrive
@@ -212,6 +215,253 @@ export const importProducts = async (rows, { onDuplicate = 'skip', defaultTeamId
         }, { confirm: true });
         if (saved) {
           byBarcode.set(String(saved.barcode).trim(), saved);
+          result.created += 1;
+        } else {
+          result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });
+        }
+      }
+    } catch (err) {
+      result.errors.push({ rowNumber, reason: `Not saved: ${err.message}`, raw: row });
+    }
+  }
+
+  return result;
+};
+
+// --- RMA CASES ---------------------------------------------------------------------------------
+// Reads the client's 27-column warranty-returns sheet. Its header row is the SECOND row (the first
+// assigns each column an owner — "NADEEM", "ACCOUNTS", "Management"), which findHeaderIndex already
+// lands on: it picks the row with the most DISTINCT values, and the owners row repeats a handful of
+// names across 27 columns.
+
+// Splits column N ("Serial Number"), which holds one serial per line — except row 9 of the sample,
+// where one cell carries two units. Serials never contain whitespace, so any separator splits.
+const splitSerials = (raw) => [...new Set(
+  String(raw || '').split(/[\s/,;|]+/).map((s) => normalizeSerial(s)).filter((s) => s.length >= SERIAL_MIN_LENGTH)
+)];
+
+// Column H packs a part number and a description into one cell, the part number on its own first
+// line ("83S0007QUE" / "90NB13Y2-M01TT0"). Only treat line 1 as a SKU when it actually looks like
+// one — a single token of digits/letters/dashes. Otherwise the whole cell is the product name.
+const splitProductCell = (raw) => {
+  const lines = String(raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return { productSku: '', productName: '' };
+  const first = lines[0];
+  if (lines.length > 1 && /^[A-Za-z0-9][A-Za-z0-9\-/.]{4,24}$/.test(first) && !/\s/.test(first)) {
+    return { productSku: first, productName: lines.slice(1).join(' ') };
+  }
+  return { productSku: '', productName: lines.join(' ') };
+};
+
+// Pulls a document number and a date out of the sheet's "INVOICE NO - X / DATED - Y" cells. The
+// wording is inconsistent across rows (INVOICE NO, INV NO, ORDER ID, SALE DATE, DATE, or nothing at
+// all), so take the first date-looking token as the date and whatever labelled text remains as the
+// number rather than insisting on one format.
+const splitRefCell = (raw) => {
+  const lines = String(raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  let ref = '';
+  let date = '';
+  for (const line of lines) {
+    const dateMatch = line.match(/(\d{1,2}[-/.][A-Za-z]{3,}[-/.]\d{2,4}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/);
+    if (dateMatch && !date) {
+      const parsed = parseRmaDate(dateMatch[1].replace(/[-/.]([A-Za-z]{3,})[-/.]/, ' $1 '));
+      if (parsed) { date = parsed; continue; }
+    }
+    const labelled = line.replace(/^\s*(invoice\s*no|inv\s*no|inv|order\s*id|sale\s*date|dated|date|no)\s*/i, '');
+    const value = labelled.replace(/^\s*[-]\s*/, '').replace(/^\s*:\s*/, '').replace(/^\s*\.\s*/, '').trim();
+    if (value && value !== '-' && !ref) ref = value;
+  }
+  return { ref, date };
+};
+
+// The status the sheet could only express as a cell FILL COLOUR, which does not survive being read
+// as data. Our own export writes the status label on the first line, so that is checked first — a
+// re-import of an export round-trips exactly. Only failing that do we guess from the last log line,
+// and a guess is never destructive: every line of both log columns is kept verbatim on the
+// timeline, and the operator can change the status from a dropdown afterwards.
+const STATUS_HINTS = [
+  [/case\s*closed/i, 'closed'],
+  [/credit\s*note|\bcn\s*(issued|rcvd|received)|issue\s*cn/i, 'credit_note'],
+  [/ready\s*for\s*collection/i, 'ready'],
+  [/delivered|handed\s*over|collected\s*by\s*customer|given\s*to\s*customer/i, 'delivered'],
+  [/not\s*possible\s*to\s*fix|beyond\s*repair|rejected/i, 'rejected'],
+  [/on\s*hold|keep\s*it\s*on\s*hold/i, 'on_hold'],
+  [/approval|estimate|quotation|quote/i, 'awaiting_approval'],
+  [/technician|faisal/i, 'with_technician'],
+  [/supplier|warranty\s*claim|submitted\s*with|rma\s*slip/i, 'with_supplier'],
+  [/self\s*check|checking|diagnos/i, 'diagnosis']
+];
+
+const inferRmaStatus = (statusCell, entries) => {
+  const firstLine = String(statusCell || '').split('\n')[0].trim();
+  const exact = RMA_STATUSES.find((s) => s.label.toLowerCase() === firstLine.toLowerCase());
+  if (exact) return { status: exact.key, inferred: false };
+
+  const newest = [...entries].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))[0];
+  const haystack = `${firstLine}\n${newest?.text || ''}`;
+  for (const [pattern, key] of STATUS_HINTS) {
+    if (pattern.test(haystack)) return { status: key, inferred: true };
+  }
+  return { status: DEFAULT_RMA_STATUS, inferred: true };
+};
+
+const CUSTOMER_TYPE_HINTS = [
+  [/market\s*place|marketplace|amazon|fba/i, 'marketplace'],
+  [/export/i, 'export'],
+  [/local/i, 'local']
+];
+
+// Turns one log column into timeline entries, tagged customer-facing or internal. Undated lines
+// inherit the case's received date so they still sort sensibly instead of jumping to 1970.
+const logEntries = (cell, internal, fallbackDate) =>
+  parseRmaLogCell(cell).map((e) => ({
+    id: `rmalog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    date: e.date || fallbackDate || new Date().toISOString(),
+    text: e.text,
+    internal,
+    by: '',
+    byName: ''
+  }));
+
+// Duplicate key for a case = its original sheet number plus its first serial. Stable across
+// re-running the same import, and distinct between two genuinely different cases (the sample sheet
+// already contains two rows numbered "04-07-2026", so the number alone will not do).
+const rmaDuplicateKey = (legacyRef, serials) => `${legacyRef}|${serials[0] || ''}`.toUpperCase();
+
+// Returns { created, updated, skipped, errors } like the other importers, plus RMA-specific
+// counters the modal reports: how many serials matched the registry, and how many statuses had to
+// be guessed rather than read.
+export const importRmaCases = async (rows, { onDuplicate = 'skip', defaultTeamId = '' } = {}) => {
+  const result = {
+    created: 0, updated: 0, skipped: 0, errors: [],
+    serialsMatched: 0, serialsUnmatched: 0, statusesInferred: 0
+  };
+  const validTeams = storageService.getTeams();
+  const existing = storageService.getRmaCases();
+  const byKey = new Map(existing.map((c) => [rmaDuplicateKey(c.legacyRef || c.rmaNo, c.serials || []), c]));
+
+  const field = (row, header) =>
+    pickField(row, RMA_SHEET_COLUMNS.find((c) => c.header === header).aliases);
+
+  // Sequential + awaited, like importProducts: a row counts only once the cloud has accepted it.
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const rowNumber = i + 3; // +2 header rows (owners + headers), +1 for 1-indexing
+
+    const rawNo = field(row, 'RMA-NO');
+    const receivedDate = parseRmaDate(field(row, 'DATE'));
+    const accountName = field(row, 'CUSOTMER NAME');
+    const serials = splitSerials(field(row, 'Serial Number'));
+
+    // Excel stored their "NN-MM-YYYY" case numbers as real DATES. We keep whatever the cell says,
+    // rendered back in the shape they typed, purely as a cross-reference — the case gets a fresh,
+    // genuinely unique number of its own.
+    const parsedNo = parseRmaDate(rawNo);
+    const legacyRef = parsedNo ? rmaDisplayDate(parsedNo) : String(rawNo || '').trim();
+
+    if (!accountName && serials.length === 0 && !legacyRef) {
+      result.errors.push({ rowNumber, reason: 'Blank row — no customer, serial or RMA number', raw: row });
+      continue;
+    }
+
+    const region = resolveRegion(row, defaultTeamId, validTeams);
+    if (region.error) {
+      result.errors.push({ rowNumber, reason: region.error, raw: row });
+      continue;
+    }
+
+    const statusCell = field(row, 'STATUS');
+    const fallbackDate = receivedDate || new Date().toISOString();
+    const timeline = [
+      ...logEntries(statusCell, false, fallbackDate),
+      ...logEntries(field(row, 'REMARK / ACTION'), true, fallbackDate)
+    ];
+    const { status, inferred } = inferRmaStatus(statusCell, timeline);
+    if (inferred) result.statusesInferred += 1;
+
+    const typeCell = field(row, 'Customer Type / Order ID');
+    const partnerCell = field(row, 'Partner / Customer / Market Place Name');
+    const orderId = (`${typeCell}\n${partnerCell}`.match(/order\s*id\s*[-:]?\s*(\S+)/i) || [])[1]
+      || typeCell.split('\n').slice(1).join(' ').trim();
+
+    const sale = splitRefCell(field(row, 'CEGTLLC Invoice - Num & Date'));
+    const supplierInv = splitRefCell(field(row, 'Supplier - Inv Num & Date'));
+    const quoteRaw = field(row, 'Quote From Local Technician');
+    const quoteMatch = quoteRaw.match(/([\d,.]+)\s*[/-]?\s*([A-Za-z]{3})?/);
+    const decisionCell = field(row, 'Quote - Approved / Rejected');
+
+    const rmaCase = {
+      legacyRef,
+      receivedDate: receivedDate || fallbackDate,
+      accountName,
+      status,
+      purchaseSupplier: field(row, 'SUPPLIER').replace(/^-$/, ''),
+      customerType: (CUSTOMER_TYPE_HINTS.find(([re]) => re.test(`${typeCell} ${partnerCell}`)) || [])[1] || '',
+      orderId: orderId || '',
+      ...splitProductCell(field(row, 'Product')),
+      productId: '',
+      physicalCondition: field(row, 'Physical Condition Of The Product'),
+      complaint: field(row, 'Customer Complaint'),
+      partnerName: partnerCell.split('\n')[0].trim(),
+      customerId: '',
+      endCustomerName: field(row, 'Customer Name').replace(/^-$/, ''),
+      customerPhone: field(row, 'Customer Number').replace(/^-$/, ''),
+      serials,
+      saleInvoiceNo: sale.ref,
+      saleDate: sale.date,
+      warrantyFrom: field(row, 'Warranty From').replace(/^-$/, ''),
+      technicianName: field(row, 'Local Technician'),
+      quoteAmount: quoteMatch ? quoteMatch[1] : '',
+      quoteCurrency: (quoteMatch && quoteMatch[2]) ? quoteMatch[2].toUpperCase() : 'AED',
+      quoteDecision: /approved/i.test(decisionCell) ? 'approved'
+        : /rejected/i.test(decisionCell) ? 'rejected'
+          : decisionCell.trim() ? 'pending' : 'none',
+      quoteDecisionBy: decisionCell.trim(),
+      claimSupplier: field(row, 'Supplier Name').replace(/^-$/, ''),
+      supplierInvoiceNo: supplierInv.ref,
+      supplierInvoiceDate: supplierInv.date,
+      replacementSerial: normalizeSerial(field(row, 'Replacement Serial Num')),
+      handoverDetails: field(row, 'Laptop Given To Customer Details'),
+      customerFeedback: field(row, 'Customer Feedback'),
+      creditNote: field(row, 'Credit Note Details'),
+      unrepairable: /^(yes|y|true)/i.test(field(row, 'Laptop Not Possible To Fix')),
+      documentsFiled: Boolean(field(row, 'Document Filing').trim()),
+      timeline,
+      teamId: region.teamId || undefined
+    };
+
+    // Fill the sale block from our own registry when the unit is one we sold. A serial we have
+    // never seen is normal here — marketplace returns were never registered — so it is counted,
+    // not rejected, and every field stays editable.
+    if (serials.length > 0) {
+      const resolved = await storageService.resolveRmaFromSerial(serials[0]);
+      if (resolved) {
+        result.serialsMatched += 1;
+        rmaCase.productId = resolved.productId || '';
+        rmaCase.customerId = resolved.customerId || '';
+        rmaCase.productName = rmaCase.productName || resolved.productName;
+        rmaCase.productSku = rmaCase.productSku || resolved.productSku;
+        rmaCase.partnerName = rmaCase.partnerName || resolved.partnerName;
+        rmaCase.customerPhone = rmaCase.customerPhone || resolved.customerPhone;
+        rmaCase.saleInvoiceNo = rmaCase.saleInvoiceNo || resolved.saleInvoiceNo;
+        rmaCase.saleDate = rmaCase.saleDate || resolved.saleDate;
+      } else {
+        result.serialsUnmatched += 1;
+      }
+    }
+
+    const match = byKey.get(rmaDuplicateKey(legacyRef, serials));
+    try {
+      if (match) {
+        if (onDuplicate === 'skip') { result.skipped += 1; continue; }
+        // teamId and the existing number are kept — a case never changes region or identity.
+        await storageService.saveRmaCase({ ...match, ...rmaCase, teamId: match.teamId, rmaNo: match.rmaNo }, { confirm: true });
+        result.updated += 1;
+      } else {
+        rmaCase.rmaNo = await storageService.reserveRmaNumber(new Date(rmaCase.receivedDate));
+        const saved = await storageService.saveRmaCase(rmaCase, { confirm: true });
+        if (saved) {
+          byKey.set(rmaDuplicateKey(legacyRef, serials), saved);
           result.created += 1;
         } else {
           result.errors.push({ rowNumber, reason: 'Failed to save (local storage full?)', raw: row });

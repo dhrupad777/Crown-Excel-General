@@ -222,7 +222,7 @@ describe('weekly backup bookkeeping', () => {
 
   it('the bundle carries every collection plus counts', () => {
     const b = storageService.getBackupBundle();
-    ['products', 'customers', 'invoices', 'serials', 'staff', 'locations', 'counts', 'exportedAt'].forEach((k) => {
+    ['products', 'customers', 'invoices', 'rmaCases', 'serials', 'staff', 'locations', 'counts', 'exportedAt'].forEach((k) => {
       expect(b).toHaveProperty(k);
     });
   });
@@ -405,6 +405,7 @@ describe('clearLocalMirror — shared-terminal data exposure', () => {
     localStorage.setItem('crown_excel_products_v2', JSON.stringify([{ id: 'p', teamId: 'Dubai' }]));
     localStorage.setItem('crown_excel_customers_v2', JSON.stringify([{ id: 'c', company: 'ACME', whatsapp: '+971' }]));
     localStorage.setItem('crown_excel_invoices_v2', JSON.stringify([{ id: 'i', teamId: 'Dubai' }]));
+    localStorage.setItem('crown_excel_rma_v2', JSON.stringify([{ id: 'r', teamId: 'Dubai' }]));
     localStorage.setItem('crown_excel_staff_v2', JSON.stringify([{ email: 'a@b.com' }]));
     localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai' }]));
     localStorage.setItem('crown_excel_pending_writes_v2', JSON.stringify([{ id: 'x' }]));
@@ -414,7 +415,7 @@ describe('clearLocalMirror — shared-terminal data exposure', () => {
   it('drops every business collection, partner contacts and the staff roster', () => {
     seed();
     storageService.clearLocalMirror();
-    for (const k of ['products', 'customers', 'invoices', 'staff']) {
+    for (const k of ['products', 'customers', 'invoices', 'rma', 'staff']) {
       expect(localStorage.getItem('crown_excel_' + k + '_v2')).toBeNull();
     }
     // Locations are deliberately kept — team resolution depends on them (see clearLocalMirror).
@@ -484,7 +485,7 @@ describe('ensureLocationsLoaded - fresh terminal', () => {
 // brand-new account can bill and look records up, but cannot take data out of the system.
 describe('data permissions - can()', () => {
   const KEYS = ['invoicesView', 'invoicesExport', 'serialsView', 'serialsExport',
-                'partnersView', 'partnersExport', 'analytics'];
+                'partnersView', 'partnersExport', 'analytics', 'rmaView', 'rmaExport'];
 
   it('grants nothing to a staff doc written before permissions existed', () => {
     storageService.setCurrentUser({ email: 's@b.com', role: 'standard', locationId: 'loc-1' });

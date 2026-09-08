@@ -9,7 +9,14 @@ import { useAuth } from '../context/AuthContext';
 // Three-step bulk import wizard: pick file → preview + duplicate policy → results with a
 // downloadable error report. `onImport(rows, { onDuplicate })` does the actual writes and
 // returns { created, updated, skipped, errors } (see importUtils).
-export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders, onImport }) => {
+//
+// Two optional slots keep one wizard serving every entity instead of a near-copy per sheet shape:
+//   notice              — a line under the file picker, for anything specific to this sheet.
+//   renderResultExtras  — extra reporting under the result tiles, for counters only this import
+//                         produces (the RMA import reports how many serials matched the registry).
+export const ImportExcelModal = ({
+  isOpen, onClose, entityLabel, templateHeaders, onImport, notice, renderResultExtras
+}) => {
   const { isAdmin } = useAuth();
   const [rows, setRows] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -124,6 +131,12 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
             className="hidden"
           />
         </div>
+
+        {notice && !result && (
+          <p className="text-[11px] font-semibold text-slate-600 bg-slate-50 border-2 border-slate-200 rounded-xl p-3">
+            {notice}
+          </p>
+        )}
 
         {parseError && (
           <p className="text-xs font-bold text-red-500 flex items-center gap-1.5">
@@ -242,6 +255,8 @@ export const ImportExcelModal = ({ isOpen, onClose, entityLabel, templateHeaders
                 </div>
               ))}
             </div>
+
+            {renderResultExtras?.(result)}
 
             {result.errors.length > 0 ? (
               <button

@@ -7,6 +7,9 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
+import {
+  RMA_SHEET_HEADERS, RMA_SHEET_WIDTHS, RMA_TEXT_COLUMNS, rmaToSheetRow, rmaDisplayDate
+} from '../config/rma';
 
 export { downloadBlob };
 
@@ -111,6 +114,45 @@ export const buildSerialExportSheets = (records) => {
       colWidths: [18, 45, 16, 80]
     }
   };
+};
+
+// RMA register. Sheet 1 reproduces the client's original 27-column layout EXACTLY — same headers,
+// same order — so the export drops into the workflow they already have and can be handed on
+// unchanged. Sheet 2 unrolls the case log, one row per entry, which the single merged cell in the
+// original sheet could never be sorted or filtered by.
+export const buildRmaExportSheets = (cases) => ({
+  register: {
+    name: 'RMA Register',
+    headers: RMA_SHEET_HEADERS,
+    rows: cases.map(rmaToSheetRow),
+    colWidths: RMA_SHEET_WIDTHS,
+    textColumns: RMA_TEXT_COLUMNS
+  },
+  log: {
+    name: 'Case Log',
+    headers: ['RMA-NO', 'Date', 'Visibility', 'Entry', 'Logged By'],
+    rows: cases.flatMap((c) =>
+      [...(c.timeline || [])]
+        .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
+        .map((e) => [
+          c.rmaNo || '',
+          rmaDisplayDate(e.date),
+          e.internal ? 'Internal' : 'Customer-facing',
+          e.text || '',
+          e.byName || e.by || ''
+        ])
+    ),
+    colWidths: [20, 14, 18, 80, 22]
+  }
+});
+
+export const exportRmaXlsx = async (cases, filename) => {
+  const { register, log } = buildRmaExportSheets(cases);
+  await exportToXlsx({
+    filename,
+    subtitle: `RMA Register · ${cases.length} case${cases.length === 1 ? '' : 's'} · Generated ${new Date().toLocaleString()}`,
+    sheets: [register, log]
+  });
 };
 
 export const exportSerialsXlsx = async (records, filename) => {
