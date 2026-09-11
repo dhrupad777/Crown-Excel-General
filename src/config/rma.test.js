@@ -33,6 +33,27 @@ describe('RMA form fields round-trip through Excel', () => {
     expect(rmaFieldFromRow(nameField, '')).toBe('');
     expect(rmaFieldFromRow(serialField, '')).toEqual([]);
   });
+
+  // The sheet's own status wording must survive import untouched — not slugified, not rejected,
+  // not silently swapped for a default. Guessing at intent here is exactly what corrupted 24 valid
+  // serials in an earlier import (see importUtils' scientific-notation regex incident).
+  it('a status the sheet already used, that is not one of ours, is kept EXACTLY as typed', () => {
+    const statusField = RMA_FORM_FIELDS.find((f) => f.key === 'status');
+    expect(rmaFieldFromRow(statusField, 'Awaiting Customer Pickup')).toBe('Awaiting Customer Pickup');
+  });
+
+  // A CASE-INSENSITIVE match to one of our own labels still resolves to the canonical key — that
+  // is a genuine match, not a guess, and is what keeps the dropdown and colour-coding working.
+  it('still resolves to our own key when the wording matches a known label, case-insensitively', () => {
+    const statusField = RMA_FORM_FIELDS.find((f) => f.key === 'status');
+    expect(rmaFieldFromRow(statusField, 'CASE CLOSED')).toBe('closed');
+  });
+
+  it('re-exporting a case with a free-text status writes that exact text back out', () => {
+    const statusField = RMA_FORM_FIELDS.find((f) => f.key === 'status');
+    const rmaCase = { status: 'Awaiting Customer Pickup' };
+    expect(rmaFieldToCell(statusField, rmaCase)).toBe('Awaiting Customer Pickup');
+  });
 });
 
 describe('parseRmaDate — day-first, matching how this business writes dates', () => {

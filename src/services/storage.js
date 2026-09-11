@@ -129,7 +129,9 @@ class StorageService {
     if (collection === 'rmaCases') {
       if (!text(record?.rmaNo)) problems.push('RMA number is required');
       if (text(record?.rmaNo).length > 60) problems.push('RMA number is too long (max 60)');
-      if (!RMA_STATUS_KEYS.includes(record?.status)) problems.push('an unknown status would hide the case from every filter');
+      // Not restricted to RMA_STATUS_KEYS: an imported sheet's own status wording is kept exactly
+      // as typed (see rmaFieldFromRow) rather than being forced into our fixed list or rejected.
+      if (!text(record?.status)) problems.push('a status is required');
       if (!Array.isArray(record?.timeline)) problems.push('the case log must be a list');
       if (!text(record?.teamId)) problems.push('region (team) is required — the case would be invisible to every store');
     }

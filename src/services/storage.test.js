@@ -162,6 +162,20 @@ describe('validateRecord — keeps the app and firestore.rules in agreement', ()
     expect(() => storageService.validateRecord('products', { name: 'Widget' })).toThrow(/region/i);
     expect(() => storageService.validateRecord('invoices', { invoiceNo: '101' })).toThrow(/region/i);
   });
+
+  // An imported RMA sheet's own status wording (e.g. "Awaiting Customer Pickup") must save exactly
+  // as typed, not be forced into our fixed dropdown list — see rmaFieldFromRow.
+  it('accepts an RMA case whose status is not one of the app’s own fixed options', () => {
+    expect(() => storageService.validateRecord('rmaCases', {
+      rmaNo: 'RMA-1', status: 'Awaiting Customer Pickup', timeline: [], teamId: 'Dubai'
+    })).not.toThrow();
+  });
+
+  it('still rejects an RMA case with a blank status', () => {
+    expect(() => storageService.validateRecord('rmaCases', {
+      rmaNo: 'RMA-1', status: '', timeline: [], teamId: 'Dubai'
+    })).toThrow(/status is required/i);
+  });
 });
 
 describe('pending writes — an unconfirmed record must survive a resync', () => {

@@ -172,13 +172,14 @@ export const rmaFieldToCell = (field, rmaCase) => {
 
 // Import: one Excel row → the field's value, ready to store. `raw` is the pickField() result for
 // this field's own header (exact match wins, matching how every other importer in this app reads a
-// column). Enum cells accept either the label (what our own export writes) or the raw key.
+// column). An enum cell matching one of our own labels resolves to its key (so the dropdown and
+// colour-coding work); anything else — a status wording the sheet already used, that isn't one of
+// ours — is kept EXACTLY as typed rather than guessed at or coerced. Nothing in the sheet is ever
+// silently rewritten.
 export const rmaFieldFromRow = (field, raw) => {
   const text = String(raw || '').trim();
   if (!text) return field.kind === 'serials' ? [] : '';
-  if (field.kind === 'enum') {
-    return findByLabel(field.options, text)?.key || findByKey(field.options, text.toLowerCase().replace(/\s+/g, '_')).key;
-  }
+  if (field.kind === 'enum') return findByLabel(field.options, text)?.key || text;
   if (field.kind === 'date') return parseRmaDate(text);
   if (field.kind === 'serials') {
     return [...new Set(text.split(/[\s/,;|]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
