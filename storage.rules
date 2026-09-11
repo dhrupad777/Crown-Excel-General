@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// Cloud Storage rules for RMA case photos. Mirrors the isStaff()/isBootstrapAdmin() logic in
+// firestore.rules (staff records live in Firestore, so a Storage rule checks them via
+// firestore.get()) — kept in sync manually since the two rule files can't share code.
+// KEEP BOOTSTRAP_ADMIN_EMAILS IN SYNC with src/config/appConfig.js and firestore.rules.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+    function callerEmail() {
+      return request.auth.token.email.lower();
+    }
+    function isBootstrapAdmin() {
+      return signedIn()
+        && callerEmail() in ['dhrupadrajpurohit@gmail.com', 'vishal@crownexcel.ae', 'vishalcrownexcel@gmail.com', 'qaistime@gmail.com'];
+    }
+    function isStaff() {
+      return isBootstrapAdmin() || (
+        signedIn()
+        && firestore.exists(/databases/(default)/documents/staff/$(callerEmail()))
+        && firestore.get(/databases/(default)/documents/staff/$(callerEmail())).data.active == true
+      );
+    }
+
+    // RMA case photos (physical condition on arrival, credit note document). Any active staff
+    // member may upload — photos are taken at intake, which is not always an admin — matching the
+    // same permission an RMA case can already be CREATED under (firestore.rules: isStaff()).
+    match /rmaPhotos/{rmaId}/{fileName} {
+      allow read: if isStaff();
+      allow write: if isStaff()
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isStaff();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -724,16 +724,16 @@ class StorageService {
       window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
     }
 
-    // RMA cases carry the partner name too. Same reason as above: a renamed partner that still
+    // RMA cases carry the customer name too. Same reason as above: a renamed partner that still
     // reads as the old name on a warranty case is the exact complaint that started this work.
     const cases = this._readRaw(STORAGE_KEYS.RMA);
     let casesChanged = false;
     const nextCases = cases.map((c) => {
       if (c.customerId !== partner.id) return c;
       const name = snapshot.company || snapshot.name;
-      if (String(c.partnerName || '') === String(name || '')) return c;
+      if (String(c.customerName || '') === String(name || '')) return c;
       casesChanged = true;
-      const updated = { ...c, partnerName: name };
+      const updated = { ...c, customerName: name };
       this._syncInBackground('rmaCases', updated.id, updated);
       return updated;
     });
@@ -1896,13 +1896,13 @@ class StorageService {
     }
     if (!record) return null;
 
-    const partnerName = String(record.customer?.company || '').trim()
+    const customerName = String(record.customer?.company || '').trim()
       || String(record.customer?.name || '').trim();
     return {
       productId: record.productId || '',
       productName: record.productName || '',
       productSku: record.sku || '',
-      partnerName,
+      customerName,
       customerId: record.customer?.id || '',
       customerPhone: record.customer?.whatsapp || '',
       saleInvoiceNo: record.invoiceNo || '',
@@ -1910,6 +1910,22 @@ class StorageService {
       soldFromTeam: record.teamId || '',
       soldFromLocation: record.locationName || ''
     };
+  }
+
+  // Uploads a physical-condition or credit-note photo for a case. Path is keyed by the case's OWN
+  // id (assigned client-side before the first save, same as any other record) so a photo can be
+  // attached while still filling in a brand-new case. Returns { url, path } — `path` is kept on the
+  // case so the file can be deleted later if the photo is replaced or removed.
+  async uploadRmaPhoto(rmaId, kind, file) {
+    if (!rmaId) throw new Error('Save the case before attaching a photo.');
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+    const path = `rmaPhotos/${rmaId}/${kind}-${Date.now()}.${ext}`;
+    const url = await firebaseService.uploadFile(path, file);
+    return { url, path };
+  }
+
+  deleteRmaPhoto(path) {
+    return firebaseService.deleteFile(path);
   }
 
   // --- STAFF & LOCATIONS (admin-managed masters) ---

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Wrench, Search, Plus, FileSpreadsheet, Upload, Lock, Loader2, CheckCircle2, AlertCircle,
-  X, ShieldCheck, ShieldAlert, MessageSquare, Trash2, Building, History
+  X, ShieldCheck, ShieldAlert, MessageSquare, Trash2, Camera, History
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { ImportExcelModal } from '../components/ImportExcelModal';
@@ -11,51 +11,16 @@ import { useAuth } from '../context/AuthContext';
 import { importRmaCases } from '../utils/importUtils';
 import { exportRmaXlsx, formatLocalDate } from '../utils/exportUtils';
 import {
-  RMA_STATUSES, RMA_CUSTOMER_TYPES, RMA_QUOTE_DECISIONS, RMA_SHEET_HEADERS,
-  DEFAULT_RMA_STATUS, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel, rmaDisplayDate, isRmaOpen
+  RMA_STATUSES, RMA_CUSTOMER_TYPES, RMA_QUOTE_DECISIONS, RMA_WARRANTY_STATUSES, RMA_RESOLUTION_TYPES,
+  RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel, rmaDisplayDate,
+  isRmaOpen
 } from '../config/rma';
 
 const RENDER_CAP_STEP = 100;
 
-const blankCase = () => ({
-  id: '',
-  rmaNo: '',
-  legacyRef: '',
-  receivedDate: new Date().toISOString(),
-  accountName: '',
-  status: DEFAULT_RMA_STATUS,
-  purchaseSupplier: '',
-  customerType: '',
-  orderId: '',
-  productName: '',
-  productSku: '',
-  productId: '',
-  physicalCondition: '',
-  complaint: '',
-  partnerName: '',
-  customerId: '',
-  endCustomerName: '',
-  customerPhone: '',
-  serials: [],
-  saleInvoiceNo: '',
-  saleDate: '',
-  warrantyFrom: '',
-  technicianName: '',
-  quoteAmount: '',
-  quoteCurrency: 'AED',
-  quoteDecision: 'none',
-  quoteDecisionBy: '',
-  claimSupplier: '',
-  supplierInvoiceNo: '',
-  supplierInvoiceDate: '',
-  replacementSerial: '',
-  handoverDetails: '',
-  customerFeedback: '',
-  creditNote: '',
-  unrepairable: false,
-  documentsFiled: false,
-  timeline: []
-});
+// Generated client-side, before the first save, so a photo can be attached while a brand-new case
+// is still being filled in — same shape as storage.js's own _newId('rma').
+const newRmaId = () => `rma-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 // An <input type="date"> wants YYYY-MM-DD in LOCAL time; toISOString would hand it a UTC day and
 // shift the date by one for anyone behind Greenwich.
@@ -79,10 +44,8 @@ const daysOpen = (rmaCase) => {
 const LABEL_CLS = 'text-[11px] font-black text-slate-700 uppercase tracking-wider block mb-1';
 const INPUT_CLS = 'input-field font-bold text-slate-900 bg-white border-slate-300 py-2.5 disabled:bg-slate-50 disabled:text-slate-500';
 
-// One field renderer for ~25 near-identical inputs. `disabled` is how a standard user sees a case
-// without being able to rewrite its identity — the security rules allow them only the timeline and
-// the status, so the form must not offer more than the server will accept.
-const Field = ({ label, value, onChange, disabled, textarea, rows = 2, type = 'text', mono, placeholder, hint }) => (
+// One field renderer for the ~20 near-identical inputs on the form.
+const Field = ({ label, value, onChange, disabled, textarea, rows = 2, mono, placeholder, hint }) => (
   <div className="form-group mb-0">
     <label className={LABEL_CLS}>{label}</label>
     {textarea ? (
@@ -96,7 +59,7 @@ const Field = ({ label, value, onChange, disabled, textarea, rows = 2, type = 't
       />
     ) : (
       <input
-        type={type}
+        type="text"
         value={value || ''}
         disabled={disabled}
         placeholder={placeholder}
@@ -105,6 +68,47 @@ const Field = ({ label, value, onChange, disabled, textarea, rows = 2, type = 't
       />
     )}
     {hint && <p className="text-[10px] font-semibold text-slate-500 mt-1">{hint}</p>}
+  </div>
+);
+
+const Select = ({ label, value, onChange, disabled, options, blankOption, sub }) => (
+  <div className="form-group mb-0">
+    <label className={LABEL_CLS}>{label} {sub && <span className="text-[9px] normal-case font-bold text-slate-400">({sub})</span>}</label>
+    <select value={value || ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} className={INPUT_CLS}>
+      {blankOption && <option value="">{blankOption}</option>}
+      {options.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+    </select>
+  </div>
+);
+
+// A photo attached to the case. Uploads straight to Cloud Storage on file pick; shows a thumbnail
+// + link once attached, with a remove button that also deletes the stored file (best-effort).
+const PhotoField = ({ label, url, uploading, disabled, onUpload, onRemove }) => (
+  <div className="form-group mb-0">
+    <label className={LABEL_CLS}>{label}</label>
+    {url ? (
+      <div className="flex items-center gap-3 p-2 border-2 border-slate-200 rounded-xl bg-slate-50">
+        <img src={url} alt={label} className="w-14 h-14 object-cover rounded-lg border border-slate-300 flex-shrink-0" />
+        <a href={url} target="_blank" rel="noreferrer" className="text-xs font-bold text-[#2563eb] hover:underline flex-1 truncate">
+          View full photo
+        </a>
+        {!disabled && (
+          <button type="button" onClick={onRemove} title="Remove photo"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 flex-shrink-0">
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    ) : (
+      <label className={`flex items-center justify-center gap-2 border-2 border-dashed rounded-xl py-4 text-xs font-bold transition-colors ${
+        disabled || uploading ? 'border-slate-200 text-slate-300 cursor-not-allowed' : 'border-slate-300 text-slate-500 hover:border-[#2563eb] hover:text-[#2563eb] cursor-pointer'
+      }`}>
+        {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+        {uploading ? 'Uploading…' : 'Attach a photo'}
+        <input type="file" accept="image/*" className="hidden" disabled={disabled || uploading}
+          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) onUpload(f); }} />
+      </label>
+    )}
   </div>
 );
 
@@ -142,6 +146,7 @@ export const RmaTracker = () => {
   const [serialInput, setSerialInput] = useState('');
   const [resolving, setResolving] = useState(false);
   const [resolvedNote, setResolvedNote] = useState('');
+  const [uploadingPhoto, setUploadingPhoto] = useState(''); // '' | 'condition' | 'creditnote'
   const [logText, setLogText] = useState('');
   const [logInternal, setLogInternal] = useState(false);
   const [logStatus, setLogStatus] = useState('');
@@ -170,6 +175,10 @@ export const RmaTracker = () => {
 
   const teams = storageService.getTeams();
 
+  // Fields the server allows a non-admin to change only while CREATING; once a case exists, only
+  // an admin can rewrite it (they can still add log entries and move the status, always).
+  const fieldsDisabled = !isAdmin && !isNew;
+
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return cases.filter((c) => {
@@ -179,9 +188,9 @@ export const RmaTracker = () => {
       if (isAdmin && teamFilter !== 'all' && (c.teamId || '') !== teamFilter) return false;
       if (!q) return true;
       return [
-        c.rmaNo, c.legacyRef, c.accountName, c.partnerName, c.endCustomerName, c.customerPhone,
-        c.productName, c.productSku, c.orderId, c.saleInvoiceNo, c.purchaseSupplier, c.claimSupplier,
-        c.technicianName, c.replacementSerial, ...(c.serials || [])
+        c.rmaNo, c.customerName, c.customerPhone, c.productName, c.productSku, c.saleInvoiceNo,
+        c.supplierName, c.supplierInvoiceNo, c.serviceProvider, c.technicianName, c.remarks,
+        ...(c.serials || [])
       ].some((v) => String(v || '').toLowerCase().includes(q));
     });
   }, [cases, searchQuery, statusFilter, typeFilter, teamFilter, isAdmin]);
@@ -189,7 +198,7 @@ export const RmaTracker = () => {
   const visible = filtered.slice(0, renderCap);
 
   const openCase = (rmaCase) => {
-    setDraft(rmaCase ? { ...rmaCase, serials: [...(rmaCase.serials || [])] } : blankCase());
+    setDraft(rmaCase ? { ...rmaCase, serials: [...(rmaCase.serials || [])] } : { ...blankRmaCase(), id: newRmaId(), receivedDate: new Date().toISOString() });
     setIsNew(!rmaCase);
     setFormError('');
     setSerialInput('');
@@ -231,10 +240,9 @@ export const RmaTracker = () => {
           productId: d.productId || found.productId,
           productName: d.productName || found.productName,
           productSku: d.productSku || found.productSku,
-          partnerName: d.partnerName || found.partnerName,
+          customerName: d.customerName || found.customerName,
           customerId: d.customerId || found.customerId,
           customerPhone: d.customerPhone || found.customerPhone,
-          accountName: d.accountName || found.partnerName,
           saleInvoiceNo: d.saleInvoiceNo || found.saleInvoiceNo,
           saleDate: d.saleDate || found.saleDate
         }));
@@ -249,9 +257,27 @@ export const RmaTracker = () => {
     serialInputRef.current?.focus();
   };
 
+  const handlePhotoUpload = async (kind, urlKey, pathKey, file) => {
+    setUploadingPhoto(kind);
+    setFormError('');
+    try {
+      const { url, path } = await storageService.uploadRmaPhoto(draft.id, kind, file);
+      set({ [urlKey]: url, [pathKey]: path });
+    } catch (err) {
+      setFormError(err.message);
+    }
+    setUploadingPhoto('');
+  };
+
+  const handlePhotoRemove = (urlKey, pathKey) => {
+    const path = draft[pathKey];
+    set({ [urlKey]: '', [pathKey]: '' });
+    if (path) storageService.deleteRmaPhoto(path);
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!draft.accountName.trim() && (draft.serials || []).length === 0) {
+    if (!draft.customerName.trim() && (draft.serials || []).length === 0) {
       setFormError('Give the case a customer name or at least one serial number, so it can be found again.');
       return;
     }
@@ -357,7 +383,7 @@ export const RmaTracker = () => {
             <button
               onClick={() => setShowImport(true)}
               className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
-              title="Import an existing RMA sheet"
+              title="Import RMA cases from a spreadsheet"
             >
               <Upload className="w-4 h-4 text-slate-700" /> Import
             </button>
@@ -366,7 +392,7 @@ export const RmaTracker = () => {
             <button
               onClick={handleExport}
               className="btn btn-outline text-xs py-2.5 px-4 font-bold flex-1 sm:flex-initial"
-              title="Download the filtered cases in the original 27-column layout"
+              title="Download the filtered cases as Excel"
             >
               <FileSpreadsheet className="w-4 h-4 text-slate-700" /> Excel
             </button>
@@ -387,7 +413,7 @@ export const RmaTracker = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => { setSearchQuery(e.target.value); setRenderCap(RENDER_CAP_STEP); }}
-              placeholder="Search RMA number, serial, customer, product, order id, invoice…"
+              placeholder="Search RMA number, serial, customer, product, invoice…"
               className="input-field pl-10 pr-16 py-3 text-sm bg-white border-slate-400 focus:border-[#2563eb] font-bold text-slate-900 w-full rounded-xl shadow-inner"
             />
             {searchQuery && (
@@ -444,7 +470,7 @@ export const RmaTracker = () => {
             <div className="font-heading font-black text-slate-800 text-lg">No RMA cases found</div>
             <p className="text-xs font-semibold max-w-md mx-auto text-slate-500">
               {cases.length === 0
-                ? 'Log a warranty return with “New RMA Case”, or import your existing sheet.'
+                ? 'Log a warranty return with “New RMA Case”, or import a spreadsheet.'
                 : 'Adjust the filters above — there are cases here, just not matching this view.'}
             </p>
           </div>
@@ -478,11 +504,6 @@ export const RmaTracker = () => {
                           <span className="inline-flex items-center gap-1.5 font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 font-bold">
                             {c.rmaNo}
                           </span>
-                          {c.legacyRef && (
-                            <div className="text-[10px] font-semibold text-slate-400 mt-1" title="Number from the original sheet">
-                              was {c.legacyRef}
-                            </div>
-                          )}
                         </td>
                         <td className="py-3.5 px-4">
                           <div className="text-xs font-bold text-slate-800 font-mono">{rmaDisplayDate(c.receivedDate)}</div>
@@ -493,7 +514,7 @@ export const RmaTracker = () => {
                           )}
                         </td>
                         <td className="py-3.5 px-4">
-                          <div className="text-xs font-bold text-slate-900">{c.accountName || <span className="text-slate-300">—</span>}</div>
+                          <div className="text-xs font-bold text-slate-900">{c.customerName || <span className="text-slate-300">—</span>}</div>
                           {c.customerType && (
                             <div className="text-[10px] font-black uppercase tracking-wider text-slate-500 mt-0.5">
                               {rmaCustomerTypeLabel(c.customerType)}
@@ -565,64 +586,44 @@ export const RmaTracker = () => {
         isOpen={Boolean(draft)}
         onClose={closeCase}
         title={isNew ? 'New RMA Case' : `RMA ${draft?.rmaNo || ''}`}
-        subtitle={isNew
-          ? 'The case number is issued when you save.'
-          : `Received ${rmaDisplayDate(draft?.receivedDate)}${draft?.legacyRef ? ` · sheet ref ${draft.legacyRef}` : ''}`}
+        subtitle={isNew ? 'The case number is issued when you save.' : `Received ${rmaDisplayDate(draft?.receivedDate)}`}
         icon={Wrench}
         maxWidth="max-w-4xl"
       >
         {draft && (
           <form onSubmit={handleSave} className="space-y-4 font-body">
 
-            {!isAdmin && (
+            {fieldsDisabled && (
               <p className="text-[11px] font-semibold text-slate-600 bg-slate-50 border-2 border-slate-200 rounded-xl p-3">
-                You can add log entries and move the status. Editing the rest of a case is restricted to
-                administrators — the server enforces that, so the fields below are shown read-only.
+                You can add log entries and move the status. Editing the rest of an existing case is
+                restricted to administrators — the server enforces that, so the fields below are shown read-only.
               </p>
             )}
 
             <Group title="Case" owner="RMA Coordinator">
-              <Field label="Customer / account" value={draft.accountName} disabled={!isAdmin}
-                onChange={(v) => set({ accountName: v })} placeholder="e.g. UNISYSTEM SRILANKA" />
+              <Field label="Customer Name" value={draft.customerName} disabled={fieldsDisabled}
+                onChange={(v) => set({ customerName: v })} placeholder="e.g. Unisystem Sri Lanka" />
+              <Select label="Customer Type" value={draft.customerType} disabled={fieldsDisabled}
+                onChange={(v) => set({ customerType: v })} options={RMA_CUSTOMER_TYPES} blankOption="Not set" />
+              <Field label="Customer #" value={draft.customerPhone} disabled={fieldsDisabled} mono
+                onChange={(v) => set({ customerPhone: v })} />
               <div className="form-group mb-0">
                 <label className={LABEL_CLS}>Date received</label>
-                <input type="date" value={dateInputValue(draft.receivedDate)} disabled={!isAdmin}
-                  onChange={(e) => set({ receivedDate: dateInputToIso(e.target.value) })}
-                  className={INPUT_CLS} />
+                <input type="date" value={dateInputValue(draft.receivedDate)} disabled={fieldsDisabled}
+                  onChange={(e) => set({ receivedDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
               </div>
-              <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Status</label>
-                <select value={draft.status} onChange={(e) => set({ status: e.target.value })} className={INPUT_CLS}>
-                  {RMA_STATUSES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
-                </select>
-              </div>
-              <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Customer type</label>
-                <select value={draft.customerType} disabled={!isAdmin}
-                  onChange={(e) => set({ customerType: e.target.value })} className={INPUT_CLS}>
-                  <option value="">Not set</option>
-                  {RMA_CUSTOMER_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-                </select>
-              </div>
-              <Field label="Order ID" value={draft.orderId} disabled={!isAdmin} mono
-                onChange={(v) => set({ orderId: v })} placeholder="Marketplace / LPN reference" />
-              <Field label="Partner / market place" value={draft.partnerName} disabled={!isAdmin}
-                onChange={(v) => set({ partnerName: v })} />
-              <Field label="End customer name" value={draft.endCustomerName} disabled={!isAdmin}
-                onChange={(v) => set({ endCustomerName: v })} />
-              <Field label="Customer number" value={draft.customerPhone} disabled={!isAdmin} mono
-                onChange={(v) => set({ customerPhone: v })} />
+              <Select label="RMA Status" value={draft.status} disabled={false}
+                onChange={(v) => set({ status: v })} options={RMA_STATUSES} sub="stack — see log below" />
             </Group>
 
             <Group title="Unit & Complaint" owner="RMA Coordinator" cols={1}>
-              {/* Serials */}
               <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Serial number(s)</label>
+                <label className={LABEL_CLS}>Serial #</label>
                 <div className="flex flex-wrap gap-2 mb-2">
                   {(draft.serials || []).map((s) => (
                     <span key={s} className="inline-flex items-center gap-1.5 font-mono text-xs text-[#2563eb] bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200 font-bold">
                       {s}
-                      {isAdmin && (
+                      {!fieldsDisabled && (
                         <button type="button" onClick={() => set({ serials: draft.serials.filter((x) => x !== s) })}
                           className="text-slate-400 hover:text-red-600" aria-label={`Remove ${s}`}>
                           <X className="w-3 h-3" />
@@ -634,7 +635,7 @@ export const RmaTracker = () => {
                     <span className="text-xs font-semibold text-slate-400">None attached yet.</span>
                   )}
                 </div>
-                {isAdmin && (
+                {!fieldsDisabled && (
                   <div className="flex gap-2">
                     <input
                       ref={serialInputRef}
@@ -658,100 +659,90 @@ export const RmaTracker = () => {
                 )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Model / part number" value={draft.productSku} disabled={!isAdmin} mono
+                <Field label="Part #" value={draft.productSku} disabled={fieldsDisabled} mono
                   onChange={(v) => set({ productSku: v })} />
-                <Field label="Product" value={draft.productName} disabled={!isAdmin}
+                <Field label="Part Description" value={draft.productName} disabled={fieldsDisabled}
                   onChange={(v) => set({ productName: v })} />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Physical condition on arrival" value={draft.physicalCondition} disabled={!isAdmin}
-                  textarea rows={3} onChange={(v) => set({ physicalCondition: v })}
-                  placeholder={'1. Laptop full box received\n2. Small scratches on body'} />
-                <Field label="Customer complaint" value={draft.complaint} disabled={!isAdmin}
-                  textarea rows={3} onChange={(v) => set({ complaint: v })} />
-              </div>
+              <Field label="Customer Complaint" value={draft.complaint} disabled={fieldsDisabled}
+                textarea rows={2} onChange={(v) => set({ complaint: v })} />
+              <Field label="Product Condition" value={draft.physicalCondition} disabled={fieldsDisabled}
+                textarea rows={2} onChange={(v) => set({ physicalCondition: v })}
+                placeholder={'e.g. Full box received, small scratches on body'} />
+              <PhotoField
+                label="Product Condition Photo"
+                url={draft.physicalConditionPhotoUrl}
+                uploading={uploadingPhoto === 'condition'}
+                disabled={fieldsDisabled}
+                onUpload={(f) => handlePhotoUpload('condition', 'physicalConditionPhotoUrl', 'physicalConditionPhotoPath', f)}
+                onRemove={() => handlePhotoRemove('physicalConditionPhotoUrl', 'physicalConditionPhotoPath')}
+              />
             </Group>
 
-            <Group title="Sale & Warranty" owner="Accounts">
-              <Field label="Our invoice number" value={draft.saleInvoiceNo} disabled={!isAdmin} mono
+            <Group title="CE Invoice (Sale)" owner="RMA Coordinator">
+              <Field label="CE Invoice #" value={draft.saleInvoiceNo} disabled={fieldsDisabled} mono
                 onChange={(v) => set({ saleInvoiceNo: v })}
                 hint={draft.customerId ? 'Filled from the serial registry.' : undefined} />
               <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Sale date</label>
-                <input type="date" value={dateInputValue(draft.saleDate)} disabled={!isAdmin}
+                <label className={LABEL_CLS}>CE Invoice Date</label>
+                <input type="date" value={dateInputValue(draft.saleDate)} disabled={fieldsDisabled}
                   onChange={(e) => set({ saleDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
               </div>
-              <Field label="Warranty from" value={draft.warrantyFrom} disabled={!isAdmin}
-                onChange={(v) => set({ warrantyFrom: v })} placeholder="Supplier / brand service centre" />
-              <Field label="Supplier (purchased from)" value={draft.purchaseSupplier} disabled={!isAdmin}
-                onChange={(v) => set({ purchaseSupplier: v })} />
             </Group>
 
-            <Group title="Repair & Quote" owner="RMA Coordinator">
-              <Field label="Local technician" value={draft.technicianName} disabled={!isAdmin}
+            <Group title="Supplier & Warranty" owner="Accounts">
+              <Field label="Supplier Name" value={draft.supplierName} disabled={fieldsDisabled}
+                onChange={(v) => set({ supplierName: v })} />
+              <Field label="Supplier Invoice #" value={draft.supplierInvoiceNo} disabled={fieldsDisabled} mono
+                onChange={(v) => set({ supplierInvoiceNo: v })} />
+              <div className="form-group mb-0">
+                <label className={LABEL_CLS}>Supplier Invoice Date</label>
+                <input type="date" value={dateInputValue(draft.supplierInvoiceDate)} disabled={fieldsDisabled}
+                  onChange={(e) => set({ supplierInvoiceDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
+              </div>
+              <Field label="Service Provider" value={draft.serviceProvider} disabled={fieldsDisabled}
+                onChange={(v) => set({ serviceProvider: v })} placeholder="Supplier / brand service centre" />
+              <Select label="Warranty Status" value={draft.warrantyStatus} disabled={fieldsDisabled}
+                onChange={(v) => set({ warrantyStatus: v })} options={RMA_WARRANTY_STATUSES} />
+            </Group>
+
+            <Group title="Repair & Approval" owner="Management">
+              <Field label="Local Technician" value={draft.technicianName} disabled={fieldsDisabled}
                 onChange={(v) => set({ technicianName: v })} />
-              <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Quote amount</label>
-                <div className="flex gap-2">
-                  <input type="text" value={draft.quoteAmount || ''} disabled={!isAdmin}
-                    onChange={(e) => set({ quoteAmount: e.target.value })}
-                    className={`${INPUT_CLS} font-mono flex-1`} placeholder="370" />
-                  <input type="text" value={draft.quoteCurrency || 'AED'} disabled={!isAdmin}
-                    onChange={(e) => set({ quoteCurrency: e.target.value.toUpperCase() })}
-                    className={`${INPUT_CLS} font-mono w-20`} maxLength={3} />
-                </div>
-              </div>
-              <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Quote decision <span className="text-[9px] text-slate-400">(Management)</span></label>
-                <select value={draft.quoteDecision} disabled={!isAdmin}
-                  onChange={(e) => set({ quoteDecision: e.target.value })} className={INPUT_CLS}>
-                  {RMA_QUOTE_DECISIONS.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}
-                </select>
-              </div>
-              <Field label="Decision by / notes" value={draft.quoteDecisionBy} disabled={!isAdmin}
+              <Field label="Technician Quote" value={draft.technicianQuote} disabled={fieldsDisabled} mono
+                onChange={(v) => set({ technicianQuote: v })} placeholder="e.g. 370 AED" />
+              <Select label="Approval Status" value={draft.quoteDecision} disabled={fieldsDisabled}
+                onChange={(v) => set({ quoteDecision: v })} options={RMA_QUOTE_DECISIONS} />
+              <Field label="Approved By" value={draft.quoteDecisionBy} disabled={fieldsDisabled}
                 onChange={(v) => set({ quoteDecisionBy: v })} />
             </Group>
 
-            <Group title="Supplier Claim" owner="Accounts">
-              <Field label="Claim submitted to" value={draft.claimSupplier} disabled={!isAdmin}
-                onChange={(v) => set({ claimSupplier: v })} />
-              <Field label="Supplier invoice number" value={draft.supplierInvoiceNo} disabled={!isAdmin} mono
-                onChange={(v) => set({ supplierInvoiceNo: v })} />
-              <div className="form-group mb-0">
-                <label className={LABEL_CLS}>Supplier invoice date</label>
-                <input type="date" value={dateInputValue(draft.supplierInvoiceDate)} disabled={!isAdmin}
-                  onChange={(e) => set({ supplierInvoiceDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
+            <Group title="Resolution" owner="RMA Coordinator" cols={1}>
+              <Select label="Repair / Replacement / Credit Note" value={draft.resolutionType} disabled={fieldsDisabled}
+                onChange={(v) => set({ resolutionType: v })} options={RMA_RESOLUTION_TYPES} />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Laptop Return Details" value={draft.handoverDetails} disabled={fieldsDisabled}
+                  textarea onChange={(v) => set({ handoverDetails: v })} />
+                <Field label="Remarks" value={draft.remarks} disabled={fieldsDisabled}
+                  textarea onChange={(v) => set({ remarks: v })} />
               </div>
-              <Field label="Replacement serial" value={draft.replacementSerial} disabled={!isAdmin} mono
-                onChange={(v) => set({ replacementSerial: v.toUpperCase() })} />
+              <Field label="Credit Note Details" value={draft.creditNoteDetails} disabled={fieldsDisabled}
+                textarea onChange={(v) => set({ creditNoteDetails: v })} />
+              <PhotoField
+                label="Credit Note Photo"
+                url={draft.creditNotePhotoUrl}
+                uploading={uploadingPhoto === 'creditnote'}
+                disabled={fieldsDisabled}
+                onUpload={(f) => handlePhotoUpload('creditnote', 'creditNotePhotoUrl', 'creditNotePhotoPath', f)}
+                onRemove={() => handlePhotoRemove('creditNotePhotoUrl', 'creditNotePhotoPath')}
+              />
             </Group>
 
-            <Group title="Resolution" owner="RMA Coordinator">
-              <Field label="Handed back to customer — details" value={draft.handoverDetails} disabled={!isAdmin}
-                textarea onChange={(v) => set({ handoverDetails: v })} />
-              <Field label="Customer feedback" value={draft.customerFeedback} disabled={!isAdmin}
-                textarea onChange={(v) => set({ customerFeedback: v })} />
-              <Field label="Credit note details" value={draft.creditNote} disabled={!isAdmin}
-                textarea onChange={(v) => set({ creditNote: v })} />
-              <div className="space-y-2 pt-6">
-                <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                  <input type="checkbox" checked={Boolean(draft.unrepairable)} disabled={!isAdmin}
-                    onChange={(e) => set({ unrepairable: e.target.checked })} className="accent-[#2563eb] w-4 h-4" />
-                  Not possible to fix
-                </label>
-                <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                  <input type="checkbox" checked={Boolean(draft.documentsFiled)} disabled={!isAdmin}
-                    onChange={(e) => set({ documentsFiled: e.target.checked })} className="accent-[#2563eb] w-4 h-4" />
-                  Documents filed
-                </label>
-              </div>
-            </Group>
-
-            {/* --- TIMELINE --- */}
+            {/* --- TIMELINE (RMA STATUS, in stack format) --- */}
             <div className="border-2 border-slate-200 rounded-xl p-4 bg-white space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2">
                 <h4 className="font-heading font-black text-xs text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <History className="w-4 h-4 text-[#2563eb]" /> Case Log
+                  <History className="w-4 h-4 text-[#2563eb]" /> RMA Status Log
                 </h4>
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
                   {[
@@ -840,7 +831,7 @@ export const RmaTracker = () => {
               </div>
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={closeCase} className="btn btn-outline font-bold px-5 py-2.5">Close</button>
-                {isAdmin && (
+                {!fieldsDisabled && (
                   <button type="submit" disabled={saving} className="btn btn-primary font-bold px-6 py-2.5 shadow-md disabled:opacity-60">
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                     {isNew ? 'Create Case' : 'Save Changes'}
@@ -856,33 +847,20 @@ export const RmaTracker = () => {
         isOpen={showImport}
         onClose={() => setShowImport(false)}
         entityLabel="RMA Cases"
-        templateHeaders={RMA_SHEET_HEADERS}
+        templateHeaders={RMA_FORM_HEADERS}
         onImport={importRmaCases}
-        notice={
-          <>
-            Reads the 27-column RMA sheet as-is — the owner row above the headers is skipped automatically.
-            Each case gets a <b>fresh RMA number</b>; the number from your sheet is kept alongside it as a
-            reference, because Excel had been storing those as dates. Serials are matched against the warranty
-            registry where we can, and accepted as-is where we can&rsquo;t. <b>Legacy .xls files can&rsquo;t be
-            read — open the file in Excel and &ldquo;Save As&rdquo; .xlsx first.</b>
-          </>
-        }
+        notice="Matches columns by header name — download the blank template above to get the exact layout. Serials are matched against the warranty registry where we can, and accepted as-is where we can't."
         renderResultExtras={(result) => (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-center">
             {[
               { label: 'Serials matched', value: result.serialsMatched, cls: 'text-emerald-700 border-emerald-200 bg-emerald-50', icon: ShieldCheck },
-              { label: 'Not in registry', value: result.serialsUnmatched, cls: 'text-amber-700 border-amber-200 bg-amber-50', icon: ShieldAlert },
-              { label: 'Statuses guessed', value: result.statusesInferred, cls: 'text-slate-600 border-slate-200 bg-slate-50', icon: Building }
+              { label: 'Not in registry', value: result.serialsUnmatched, cls: 'text-amber-700 border-amber-200 bg-amber-50', icon: ShieldAlert }
             ].map((c) => (
               <div key={c.label} className={`rounded-xl border-2 p-3 ${c.cls}`}>
                 <div className="font-heading font-black text-lg font-mono">{c.value}</div>
                 <div className="text-[10px] font-black uppercase tracking-wider">{c.label}</div>
               </div>
             ))}
-            <p className="sm:col-span-3 text-[10px] font-semibold text-slate-500 text-left">
-              Nothing was discarded: every line of both log columns is on the case timeline, and a guessed
-              status is only a starting point — change it from the dropdown on any case.
-            </p>
           </div>
         )}
       />

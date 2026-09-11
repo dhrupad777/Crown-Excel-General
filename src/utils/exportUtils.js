@@ -8,7 +8,7 @@ import autoTable from 'jspdf-autotable';
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
 import {
-  RMA_SHEET_HEADERS, RMA_SHEET_WIDTHS, RMA_TEXT_COLUMNS, rmaToSheetRow, rmaDisplayDate
+  RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaDisplayDate
 } from '../config/rma';
 
 export { downloadBlob };
@@ -123,9 +123,8 @@ export const buildSerialExportSheets = (records) => {
 export const buildRmaExportSheets = (cases) => ({
   register: {
     name: 'RMA Register',
-    headers: RMA_SHEET_HEADERS,
-    rows: cases.map(rmaToSheetRow),
-    colWidths: RMA_SHEET_WIDTHS,
+    headers: RMA_FORM_HEADERS,
+    rows: cases.map((c) => RMA_FORM_FIELDS.map((f) => rmaFieldToCell(f, c))),
     textColumns: RMA_TEXT_COLUMNS
   },
   log: {

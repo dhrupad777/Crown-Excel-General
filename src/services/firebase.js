@@ -22,6 +22,7 @@ import {
   getCountFromServer,
   serverTimestamp
 } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 // Re-exported so the rest of the app never imports firebase/firestore directly.
 export { serverTimestamp };
@@ -41,6 +42,7 @@ class FirebaseService {
   constructor() {
     this.app = null;
     this.db = null;
+    this.storage = null;
     this.analytics = null;
     this.isOnline = navigator.onLine;
     this.isInitialized = false;
@@ -128,6 +130,15 @@ class FirebaseService {
         console.log("🔥 Firebase Firestore connected in standard mode:", cacheErr.message);
       }
       
+      // Cloud Storage (RMA case photos). Separate try/catch: a Storage hiccup must never take
+      // Firestore down with it, and getStorage() itself doesn't throw even before the project's
+      // default bucket has been provisioned — only an actual upload call would.
+      try {
+        this.storage = getStorage(this.app);
+      } catch (storageErr) {
+        console.warn("Firebase Storage initialization skipped:", storageErr.message);
+      }
+
       this.isInitialized = true;
     } catch (error) {
       console.warn("Firebase initialization warning:", error.message);
@@ -148,6 +159,35 @@ class FirebaseService {
       window.dispatchEvent(new CustomEvent('crown-sync-error', {
         detail: { collection: collectionName, id, code, message: err?.message || String(err) }
       }));
+    }
+  }
+
+  // Uploads a file to Cloud Storage and returns its public download URL. Storage isn't provisioned
+  // on every project by default (it's a one-time console step, same as enabling Google sign-in) —
+  // when that step hasn't happened yet, the SDK's error is unreadable, so it's translated here.
+  async uploadFile(path, file) {
+    if (!this.storage) throw new Error('Cloud Storage is not connected.');
+    try {
+      const fileRef = ref(this.storage, path);
+      await uploadBytes(fileRef, file, { contentType: file.type });
+      return await getDownloadURL(fileRef);
+    } catch (err) {
+      if (err?.code === 'storage/unknown' || err?.code === 'storage/unauthorized' || /bucket/i.test(err?.message || '')) {
+        throw new Error("Photo storage isn't set up yet for this project. Ask an administrator to open the Firebase console → Storage → Get Started, then try again.");
+      }
+      throw err;
+    }
+  }
+
+  // Best-effort: a photo left behind after its case field is cleared or replaced costs nothing
+  // critical, so a delete failure (already gone, offline, not provisioned) is swallowed.
+  async deleteFile(path) {
+    if (!this.storage || !path) return false;
+    try {
+      await deleteObject(ref(this.storage, path));
+      return true;
+    } catch {
+      return false;
     }
   }
 

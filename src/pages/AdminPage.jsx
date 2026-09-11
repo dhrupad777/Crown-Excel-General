@@ -118,7 +118,7 @@ export const AdminPage = () => {
     ...archived.products.map((r) => ({ collection: 'products', typeLabel: 'Product', id: r.id, label: r.name || r.id, sub: r.barcode ? `#${r.barcode}` : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
     ...archived.customers.map((r) => ({ collection: 'customers', typeLabel: 'Customer', id: r.id, label: r.name || r.id, sub: r.whatsapp || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
     ...archived.invoices.map((r) => ({ collection: 'invoices', typeLabel: 'Invoice', id: r.id, label: r.id, sub: r.customer ? customerPrimaryName(r.customer) : '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt })),
-    ...(archived.rmaCases || []).map((r) => ({ collection: 'rmaCases', typeLabel: 'RMA', id: r.id, label: r.rmaNo || r.id, sub: r.productName || r.partnerName || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
+    ...(archived.rmaCases || []).map((r) => ({ collection: 'rmaCases', typeLabel: 'RMA', id: r.id, label: r.rmaNo || r.id, sub: r.productName || r.customerName || '', deletedBy: r.deletedByName || r.deletedBy, deletedAt: r.deletedAt }))
   ].sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
 
   const purgeDate = (deletedAt) =>
