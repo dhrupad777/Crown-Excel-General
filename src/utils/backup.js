@@ -5,7 +5,7 @@
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
 import { storageService } from '../services/storage';
-import { RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell } from '../config/rma';
+import { RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaStatusStack } from '../config/rma';
 
 const escapeXml = (s) =>
   String(s)
@@ -177,7 +177,10 @@ export const bundleToSheets = (bundle) => {
     {
       name: 'RMA',
       headers: [...RMA_FORM_HEADERS, 'Record Status', 'Region'],
-      rows: rmaCases.map((c) => [...RMA_FORM_FIELDS.map((f) => rmaFieldToCell(f, c)), liveOrArchived(c), c.teamId || '']),
+      rows: rmaCases.map((c) => [
+        ...RMA_FORM_FIELDS.map((f) => (f.key === 'status' ? rmaStatusStack(c) : rmaFieldToCell(f, c))),
+        liveOrArchived(c), c.teamId || ''
+      ]),
       textColumns: RMA_TEXT_COLUMNS
     },
     {

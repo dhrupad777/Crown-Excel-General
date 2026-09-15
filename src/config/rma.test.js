@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   RMA_FORM_FIELDS, blankRmaCase, rmaFieldToCell, rmaFieldFromRow, parseRmaDate, rmaDisplayDate,
-  isRmaOpen, rmaStatus
+  rmaDisplayDateTime, rmaStatusStack, isRmaOpen, rmaStatus
 } from './rma';
 
 describe('RMA form fields round-trip through Excel', () => {
@@ -68,6 +68,40 @@ describe('parseRmaDate — day-first, matching how this business writes dates', 
     // A bare "YYYY-MM-DDT00:00:00Z" Date is exactly the failure mode this guards against.
     const iso = parseRmaDate(new Date('2026-09-05T00:00:00.000Z'));
     expect(rmaDisplayDate(iso)).toBe('05-09-2026');
+  });
+});
+
+describe('rmaDisplayDateTime', () => {
+  it('adds hours and minutes to the plain date', () => {
+    expect(rmaDisplayDateTime('2026-09-05T14:32:00.000Z')).toMatch(/^05-09-2026 \d{2}:\d{2}$/);
+  });
+  it('is blank for no date', () => {
+    expect(rmaDisplayDateTime('')).toBe('');
+  });
+});
+
+// Reproduces the client's own reference sheet — a case's whole history stacked into one cell,
+// current status first — the ask being to keep that exact shape on export, with a time added since
+// the app (unlike the old sheet) tracks the precise moment of each update.
+describe('rmaStatusStack — the RMA STATUS column, as the reference sheet packed it', () => {
+  it('stacks the current status above every dated log entry, oldest first, each with a time', () => {
+    const rmaCase = {
+      status: 'closed',
+      timeline: [
+        { id: '2', date: '2026-08-03T09:00:00.000Z', text: 'RCVD CN FROM SUPPLIER', internal: false },
+        { id: '1', date: '2026-07-15T11:30:00.000Z', text: 'LAPTOP RCVD FROM TECHCHIP SHOP', internal: false }
+      ]
+    };
+    const cell = rmaStatusStack(rmaCase);
+    const lines = cell.split('\n');
+    expect(lines[0]).toBe('Case closed');
+    expect(lines[1]).toBe('');
+    expect(lines[2]).toMatch(/^15-07-2026 \d{2}:\d{2} - LAPTOP RCVD FROM TECHCHIP SHOP$/);
+    expect(lines[3]).toMatch(/^03-08-2026 \d{2}:\d{2} - RCVD CN FROM SUPPLIER$/);
+  });
+
+  it('still shows just the current status when nothing has been logged yet', () => {
+    expect(rmaStatusStack({ status: 'received', timeline: [] })).toBe('Unit received\n');
   });
 });
 

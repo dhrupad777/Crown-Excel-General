@@ -79,6 +79,16 @@ export const rmaDisplayDate = (iso) => {
   return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()}`;
 };
 
+// Same, plus the time of day. The client's own reference sheet only ever recorded a date for each
+// status update; our timeline carries the precise moment an entry was logged, so the export can be
+// more exact than the sheet it replaces.
+export const rmaDisplayDateTime = (iso) => {
+  if (!iso) return '';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return `${rmaDisplayDate(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
 // A whole-day cell read out of Excel arrives as midnight UTC. Re-anchoring it to the same calendar
 // day in LOCAL time is what stops a date sliding to the previous day for anyone west of Greenwich.
 const anchorWholeDay = (d) => {
@@ -168,6 +178,20 @@ export const rmaFieldToCell = (field, rmaCase) => {
   if (field.kind === 'date') return v ? rmaDisplayDate(v) : '';
   if (field.kind === 'serials') return (v || []).join(', ');
   return v || '';
+};
+
+// The client's reference sheet packed a case's whole history into ONE cell: the current status,
+// then every dated update stacked underneath it. This rebuilds that exact shape for the STATUS
+// column specifically (every other column keeps its plain value via rmaFieldToCell) — each line
+// now carries a time as well as a date, since the timeline records the precise moment, not just
+// the day. Deliberately export-only: it is not meant to be parsed back in (see rmaFieldFromRow),
+// the same way the original sheet was a business record, not a re-importable data file.
+export const rmaStatusStack = (rmaCase) => {
+  const current = rmaStatus(rmaCase?.status).label;
+  const entries = [...(rmaCase?.timeline || [])]
+    .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
+    .map((e) => `${rmaDisplayDateTime(e.date)} - ${e.text}`);
+  return [current, '', ...entries].join('\n');
 };
 
 // Import: one Excel row → the field's value, ready to store. `raw` is the pickField() result for

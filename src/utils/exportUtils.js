@@ -8,7 +8,7 @@ import autoTable from 'jspdf-autotable';
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
 import {
-  RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaDisplayDate
+  RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaStatusStack, rmaDisplayDateTime
 } from '../config/rma';
 
 export { downloadBlob };
@@ -124,24 +124,26 @@ export const buildRmaExportSheets = (cases) => ({
   register: {
     name: 'RMA Register',
     headers: RMA_FORM_HEADERS,
-    rows: cases.map((c) => RMA_FORM_FIELDS.map((f) => rmaFieldToCell(f, c))),
+    // The STATUS column is special-cased to the full dated stack (see rmaStatusStack) — matching
+    // how the client's own reference sheet packed a case's whole history into that one cell.
+    rows: cases.map((c) => RMA_FORM_FIELDS.map((f) => (f.key === 'status' ? rmaStatusStack(c) : rmaFieldToCell(f, c)))),
     textColumns: RMA_TEXT_COLUMNS
   },
   log: {
     name: 'Case Log',
-    headers: ['RMA-NO', 'Date', 'Visibility', 'Entry', 'Logged By'],
+    headers: ['RMA-NO', 'Date & Time', 'Visibility', 'Entry', 'Logged By'],
     rows: cases.flatMap((c) =>
       [...(c.timeline || [])]
         .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
         .map((e) => [
           c.rmaNo || '',
-          rmaDisplayDate(e.date),
+          rmaDisplayDateTime(e.date),
           e.internal ? 'Internal' : 'Customer-facing',
           e.text || '',
           e.byName || e.by || ''
         ])
     ),
-    colWidths: [20, 14, 18, 80, 22]
+    colWidths: [20, 18, 18, 80, 22]
   }
 });
 
