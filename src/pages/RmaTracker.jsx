@@ -486,7 +486,6 @@ export const RmaTracker = () => {
                     <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Product</th>
                     <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Serial</th>
                     <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Status</th>
-                    <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Latest Update</th>
                     {isAdmin && <th className="py-4 px-4 text-[11px] font-black text-slate-600 uppercase tracking-wider">Region</th>}
                   </tr>
                 </thead>
@@ -546,18 +545,15 @@ export const RmaTracker = () => {
                             </div>
                           )}
                         </td>
-                        <td className="py-3.5 px-4">
+                        <td className="py-3.5 px-4 max-w-[280px]">
                           <span className={`inline-flex items-center text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${rmaStatusClasses(c.status)}`}>
                             {rmaStatus(c.status).label}
                           </span>
-                        </td>
-                        <td className="py-3.5 px-4 max-w-[280px]">
-                          {latest ? (
-                            <>
-                              <div className="text-[11px] font-semibold text-slate-700 truncate" title={latest.text}>{latest.text}</div>
-                              <div className="text-[10px] font-bold text-slate-400 mt-0.5 font-mono">{rmaDisplayDate(latest.date)}</div>
-                            </>
-                          ) : <span className="text-slate-300">—</span>}
+                          {latest && (
+                            <div className="text-[11px] font-semibold text-slate-700 truncate mt-1" title={latest.text}>
+                              {latest.text}
+                            </div>
+                          )}
                         </td>
                         {isAdmin && <td className="py-3.5 px-4"><TeamTag team={c.teamId} /></td>}
                       </tr>
