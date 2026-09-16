@@ -62,6 +62,12 @@ export const RMA_QUOTE_DECISIONS = [
   { key: 'rejected', label: 'Rejected' }
 ];
 
+export const RMA_REPAIR_METHODS = [
+  { key: 'self_check', label: 'Self-check' },
+  { key: 'service_center', label: 'Service Center' },
+  { key: 'local_technician', label: 'Local Technician' }
+];
+
 export const RMA_RESOLUTION_TYPES = [
   { key: 'none', label: 'Not decided yet' },
   { key: 'repair', label: 'Repair' },
@@ -136,6 +142,9 @@ export const RMA_FORM_FIELDS = [
   { header: 'SUPPLIER INVOICE DATE', key: 'supplierInvoiceDate', kind: 'date' },
   { header: 'SERVICE PROVIDER', key: 'serviceProvider', kind: 'text' },
   { header: 'WARRANTY STATUS', key: 'warrantyStatus', kind: 'enum', options: RMA_WARRANTY_STATUSES },
+  { header: 'REPAIR METHOD', key: 'repairMethod', kind: 'enum', options: RMA_REPAIR_METHODS },
+  { header: 'SELF-CHECK BY', key: 'selfCheckBy', kind: 'text' },
+  { header: 'SERVICE CENTER TICKET #', key: 'serviceCenterTicketNo', kind: 'text' },
   { header: 'LOCAL TECHNICIAN', key: 'technicianName', kind: 'text' },
   { header: 'TECHNICIAN QUOTE', key: 'technicianQuote', kind: 'text' },
   { header: 'APPROVAL STATUS', key: 'quoteDecision', kind: 'enum', options: RMA_QUOTE_DECISIONS },
@@ -143,6 +152,10 @@ export const RMA_FORM_FIELDS = [
   { header: 'REPAIR / REPLACEMENT / CREDIT NOTE', key: 'resolutionType', kind: 'enum', options: RMA_RESOLUTION_TYPES },
   { header: 'LAPTOP RETURN DETAILS', key: 'handoverDetails', kind: 'text' },
   { header: 'REMARKS', key: 'remarks', kind: 'text' },
+  { header: 'REPLACEMENT SERIAL #', key: 'replacementSerial', kind: 'text' },
+  { header: 'REPLACEMENT MODEL', key: 'replacementModel', kind: 'text' },
+  { header: 'REPLACEMENT DATE', key: 'replacementDate', kind: 'date' },
+  { header: 'CREDIT AMOUNT', key: 'creditAmount', kind: 'text' },
   { header: 'PHYSICAL CONDITION PHOTO', key: 'physicalConditionPhotoUrl', kind: 'photo' },
   { header: 'CREDIT NOTE DETAILS', key: 'creditNoteDetails', kind: 'text' },
   { header: 'CREDIT NOTE PHOTO', key: 'creditNotePhotoUrl', kind: 'photo' }
@@ -152,7 +165,10 @@ export const RMA_FORM_HEADERS = RMA_FORM_FIELDS.map((f) => f.header);
 
 // Columns Excel would otherwise read as a NUMBER and corrupt (dropped leading zeros, rounding past
 // ~15 digits) — declared at column level so a value typed into a blank template later stays text.
-const RMA_TEXT_KEYS = new Set(['rmaNo', 'customerPhone', 'productSku', 'serials', 'saleInvoiceNo', 'supplierInvoiceNo']);
+const RMA_TEXT_KEYS = new Set([
+  'rmaNo', 'customerPhone', 'productSku', 'serials', 'saleInvoiceNo', 'supplierInvoiceNo',
+  'serviceCenterTicketNo', 'replacementSerial'
+]);
 export const RMA_TEXT_COLUMNS = RMA_FORM_FIELDS.map((f, i) => (RMA_TEXT_KEYS.has(f.key) ? i : -1)).filter((i) => i >= 0);
 
 // A blank case: every field present as an empty value, plus the timeline the "RMA STATUS" stack

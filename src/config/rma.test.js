@@ -12,7 +12,10 @@ describe('RMA form fields round-trip through Excel', () => {
       status: 'with_technician',
       customerType: 'marketplace',
       serials: ['ABC123', 'DEF456'],
-      saleDate: parseRmaDate('05-09-2026')
+      saleDate: parseRmaDate('05-09-2026'),
+      repairMethod: 'service_center',
+      resolutionType: 'replacement',
+      replacementDate: parseRmaDate('10-09-2026')
     };
     for (const field of RMA_FORM_FIELDS) {
       if (field.kind === 'photo') continue; // a URL isn't meant to round-trip back into a value

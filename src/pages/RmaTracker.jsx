@@ -12,8 +12,8 @@ import { importRmaCases } from '../utils/importUtils';
 import { exportRmaXlsx, formatLocalDate } from '../utils/exportUtils';
 import {
   RMA_STATUSES, RMA_CUSTOMER_TYPES, RMA_QUOTE_DECISIONS, RMA_WARRANTY_STATUSES, RMA_RESOLUTION_TYPES,
-  RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel, rmaDisplayDate,
-  isRmaOpen
+  RMA_REPAIR_METHODS, RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel,
+  rmaDisplayDate, isRmaOpen
 } from '../config/rma';
 
 const RENDER_CAP_STEP = 100;
@@ -178,6 +178,11 @@ export const RmaTracker = () => {
   // Fields the server allows a non-admin to change only while CREATING; once a case exists, only
   // an admin can rewrite it (they can still add log entries and move the status, always).
   const fieldsDisabled = !isAdmin && !isNew;
+
+  // Older cases saved before this field existed still have technician data but no repairMethod —
+  // treat those as "Local Technician" rather than showing a blank picker.
+  const repairMethod = draft?.repairMethod
+    || (draft?.technicianName || draft?.technicianQuote || draft?.quoteDecisionBy ? 'local_technician' : '');
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -702,36 +707,72 @@ export const RmaTracker = () => {
                 onChange={(v) => set({ warrantyStatus: v })} options={RMA_WARRANTY_STATUSES} />
             </Group>
 
-            <Group title="Repair & Approval" owner="Management">
-              <Field label="Local Technician" value={draft.technicianName} disabled={fieldsDisabled}
-                onChange={(v) => set({ technicianName: v })} />
-              <Field label="Technician Quote" value={draft.technicianQuote} disabled={fieldsDisabled} mono
-                onChange={(v) => set({ technicianQuote: v })} placeholder="e.g. 370 AED" />
-              <Select label="Approval Status" value={draft.quoteDecision} disabled={fieldsDisabled}
-                onChange={(v) => set({ quoteDecision: v })} options={RMA_QUOTE_DECISIONS} />
-              <Field label="Approved By" value={draft.quoteDecisionBy} disabled={fieldsDisabled}
-                onChange={(v) => set({ quoteDecisionBy: v })} />
+            <Group title="Repair & Approval" owner="Management" cols={1}>
+              <Select label="Repair Method" value={repairMethod} disabled={fieldsDisabled}
+                onChange={(v) => set({ repairMethod: v })} options={RMA_REPAIR_METHODS} blankOption="Not set" />
+              {repairMethod === 'self_check' && (
+                <Field label="Self-Check By" value={draft.selfCheckBy} disabled={fieldsDisabled}
+                  onChange={(v) => set({ selfCheckBy: v })} placeholder="Name of the person who checked it" />
+              )}
+              {repairMethod === 'service_center' && (
+                <Field label="Service Center Ticket #" value={draft.serviceCenterTicketNo} disabled={fieldsDisabled} mono
+                  onChange={(v) => set({ serviceCenterTicketNo: v })} />
+              )}
+              {repairMethod === 'local_technician' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="Local Technician" value={draft.technicianName} disabled={fieldsDisabled}
+                    onChange={(v) => set({ technicianName: v })} />
+                  <Field label="Technician Quote" value={draft.technicianQuote} disabled={fieldsDisabled} mono
+                    onChange={(v) => set({ technicianQuote: v })} placeholder="e.g. 370 AED" />
+                  <Select label="Approval Status" value={draft.quoteDecision} disabled={fieldsDisabled}
+                    onChange={(v) => set({ quoteDecision: v })} options={RMA_QUOTE_DECISIONS} />
+                  <Field label="Approved By" value={draft.quoteDecisionBy} disabled={fieldsDisabled}
+                    onChange={(v) => set({ quoteDecisionBy: v })} />
+                </div>
+              )}
             </Group>
 
             <Group title="Resolution" owner="RMA Coordinator" cols={1}>
               <Select label="Repair / Replacement / Credit Note" value={draft.resolutionType} disabled={fieldsDisabled}
                 onChange={(v) => set({ resolutionType: v })} options={RMA_RESOLUTION_TYPES} />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Remarks" value={draft.remarks} disabled={fieldsDisabled}
+                textarea onChange={(v) => set({ remarks: v })} />
+
+              {draft.resolutionType === 'repair' && (
                 <Field label="Laptop Return Details" value={draft.handoverDetails} disabled={fieldsDisabled}
                   textarea onChange={(v) => set({ handoverDetails: v })} />
-                <Field label="Remarks" value={draft.remarks} disabled={fieldsDisabled}
-                  textarea onChange={(v) => set({ remarks: v })} />
-              </div>
-              <Field label="Credit Note Details" value={draft.creditNoteDetails} disabled={fieldsDisabled}
-                textarea onChange={(v) => set({ creditNoteDetails: v })} />
-              <PhotoField
-                label="Credit Note Photo"
-                url={draft.creditNotePhotoUrl}
-                uploading={uploadingPhoto === 'creditnote'}
-                disabled={fieldsDisabled}
-                onUpload={(f) => handlePhotoUpload('creditnote', 'creditNotePhotoUrl', 'creditNotePhotoPath', f)}
-                onRemove={() => handlePhotoRemove('creditNotePhotoUrl', 'creditNotePhotoPath')}
-              />
+              )}
+
+              {draft.resolutionType === 'replacement' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field label="New Product Serial" value={draft.replacementSerial} disabled={fieldsDisabled} mono
+                    onChange={(v) => set({ replacementSerial: v })} />
+                  <Field label="New Product Model" value={draft.replacementModel} disabled={fieldsDisabled}
+                    onChange={(v) => set({ replacementModel: v })} />
+                  <div className="form-group mb-0">
+                    <label className={LABEL_CLS}>Replacement Date</label>
+                    <input type="date" value={dateInputValue(draft.replacementDate)} disabled={fieldsDisabled}
+                      onChange={(e) => set({ replacementDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
+                  </div>
+                </div>
+              )}
+
+              {draft.resolutionType === 'credit_note' && (
+                <>
+                  <Field label="Credit Amount" value={draft.creditAmount} disabled={fieldsDisabled} mono
+                    onChange={(v) => set({ creditAmount: v })} placeholder="e.g. 370 AED" />
+                  <Field label="Credit Note Details" value={draft.creditNoteDetails} disabled={fieldsDisabled}
+                    textarea onChange={(v) => set({ creditNoteDetails: v })} />
+                  <PhotoField
+                    label="Credit Note Attachment"
+                    url={draft.creditNotePhotoUrl}
+                    uploading={uploadingPhoto === 'creditnote'}
+                    disabled={fieldsDisabled}
+                    onUpload={(f) => handlePhotoUpload('creditnote', 'creditNotePhotoUrl', 'creditNotePhotoPath', f)}
+                    onRemove={() => handlePhotoRemove('creditNotePhotoUrl', 'creditNotePhotoPath')}
+                  />
+                </>
+              )}
             </Group>
 
             {/* --- TIMELINE (RMA STATUS, in stack format) --- */}
