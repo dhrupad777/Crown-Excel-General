@@ -24,6 +24,7 @@ import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { firebaseService } from '../services/firebase';
 import { guessProductDefaults } from '../utils/productDefaults';
+import { matchesProductQuery } from '../utils/productSearch';
 import { useAuth } from '../context/AuthContext';
 import { normalizeSerial, SERIAL_MIN_LENGTH } from '../config/appConfig';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
@@ -105,13 +106,7 @@ export const SerialCapture = () => {
   // Product autocomplete (name / barcode / sku / category)
   useEffect(() => {
     if (productSearchQuery.trim().length > 0) {
-      const q = productSearchQuery.toLowerCase();
-      setProductResults(storageService.getProducts().filter(p =>
-        p.name?.toLowerCase().includes(q) ||
-        p.barcode?.includes(productSearchQuery) ||
-        p.sku?.toLowerCase().includes(q) ||
-        p.category?.toLowerCase().includes(q)
-      ));
+      setProductResults(storageService.getProducts().filter(p => matchesProductQuery(p, productSearchQuery)));
       setShowProductDropdown(true);
     } else {
       setProductResults([]);

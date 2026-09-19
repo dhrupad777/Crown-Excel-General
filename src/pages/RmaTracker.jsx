@@ -12,7 +12,7 @@ import { importRmaCases } from '../utils/importUtils';
 import { exportRmaXlsx, formatLocalDate } from '../utils/exportUtils';
 import {
   RMA_STATUSES, RMA_CUSTOMER_TYPES, RMA_QUOTE_DECISIONS, RMA_WARRANTY_STATUSES, RMA_RESOLUTION_TYPES,
-  RMA_REPAIR_METHODS, RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel,
+  RMA_REPAIR_METHODS, RMA_WARRANTY_SOURCES, RMA_CONDITION_CHECKS, RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel,
   rmaDisplayDate, isRmaOpen
 } from '../config/rma';
 
@@ -667,9 +667,25 @@ export const RmaTracker = () => {
               </div>
               <Field label="Customer Complaint" value={draft.complaint} disabled={fieldsDisabled}
                 textarea rows={2} onChange={(v) => set({ complaint: v })} />
-              <Field label="Product Condition" value={draft.physicalCondition} disabled={fieldsDisabled}
+              <div className="form-group mb-0">
+                <label className={LABEL_CLS}>Product Condition</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 p-3 border-2 border-slate-200 rounded-xl bg-slate-50">
+                  {RMA_CONDITION_CHECKS.map((o) => {
+                    const tags = draft.conditionTags || [];
+                    return (
+                      <label key={o.key} className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                        <input type="checkbox" checked={tags.includes(o.key)} disabled={fieldsDisabled}
+                          onChange={(e) => set({ conditionTags: e.target.checked ? [...tags, o.key] : tags.filter((k) => k !== o.key) })}
+                          className="accent-[#2563eb] w-4 h-4" />
+                        {o.label}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <Field label="Anything else about the condition" value={draft.physicalCondition} disabled={fieldsDisabled}
                 textarea rows={2} onChange={(v) => set({ physicalCondition: v })}
-                placeholder={'e.g. Full box received, small scratches on body'} />
+                placeholder="Anything the checklist above doesn't cover" />
               <PhotoField
                 label="Product Condition Photo"
                 url={draft.physicalConditionPhotoUrl}
@@ -704,7 +720,13 @@ export const RmaTracker = () => {
               <Field label="Service Provider" value={draft.serviceProvider} disabled={fieldsDisabled}
                 onChange={(v) => set({ serviceProvider: v })} placeholder="Supplier / brand service centre" />
               <Select label="Warranty Status" value={draft.warrantyStatus} disabled={fieldsDisabled}
-                onChange={(v) => set({ warrantyStatus: v })} options={RMA_WARRANTY_STATUSES} />
+                onChange={(v) => set({ warrantyStatus: v })} options={RMA_WARRANTY_STATUSES} blankOption="Not set" />
+              <Select label="Warranty From" value={draft.warrantyFrom} disabled={fieldsDisabled}
+                onChange={(v) => set({ warrantyFrom: v })} options={RMA_WARRANTY_SOURCES} blankOption="Not set" />
+              {draft.warrantyFrom === 'local_market' && (
+                <Field label="Local Market Supplier Name" value={draft.warrantyFromSupplier} disabled={fieldsDisabled}
+                  onChange={(v) => set({ warrantyFromSupplier: v })} placeholder="Which supplier in the local market?" />
+              )}
             </Group>
 
             <Group title="Repair & Approval" owner="Management" cols={1}>

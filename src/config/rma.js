@@ -1,26 +1,45 @@
 // RMA (warranty returns) vocabulary, shared by the tracker page, the Excel exporter and the Excel
 // importer. Everything the three have to agree on lives here so they cannot drift apart.
 
-// Ordered roughly as a case progresses. `tone` drives the pill colour.
+// The client's own status vocabulary, ordered roughly as a case progresses. `tone` drives the pill
+// colour. Keys that existed before this list was adopted are kept verbatim (received, with_technician,
+// ready, delivered, credit_note, on_hold, closed) so cases already logged under them keep working.
 export const RMA_STATUSES = [
-  { key: 'received', label: 'Unit received', tone: 'blue' },
-  { key: 'diagnosis', label: 'Self-check / diagnosis', tone: 'blue' },
-  { key: 'with_supplier', label: 'With supplier', tone: 'amber' },
-  { key: 'with_technician', label: 'With technician', tone: 'amber' },
-  { key: 'awaiting_approval', label: 'Quote awaiting approval', tone: 'amber' },
-  { key: 'on_hold', label: 'On hold', tone: 'amber' },
-  { key: 'ready', label: 'Ready for collection', tone: 'cyan' },
-  { key: 'delivered', label: 'Delivered to customer', tone: 'emerald' },
-  { key: 'credit_note', label: 'Credit note issued', tone: 'emerald' },
-  { key: 'closed', label: 'Case closed', tone: 'emerald' },
-  { key: 'rejected', label: 'Not repairable / rejected', tone: 'red' }
+  { key: 'received', label: 'RMA Received & Under Review', tone: 'blue' },
+  { key: 'awaiting_customer_info', label: 'Awaiting Customer Information', tone: 'amber' },
+  { key: 'awaiting_customer_approval', label: 'Awaiting Customer Approval', tone: 'amber' },
+  { key: 'awaiting_supplier_approval', label: 'Awaiting Supplier Approval', tone: 'amber' },
+  { key: 'awaiting_management_approval', label: 'Awaiting Management Approval', tone: 'amber' },
+  { key: 'warranty_rejected', label: 'Warranty Rejected', tone: 'red' },
+  { key: 'with_service_centre', label: 'With Service Centre', tone: 'amber' },
+  { key: 'with_technician', label: 'With Local Technician', tone: 'amber' },
+  { key: 'awaiting_quotation', label: 'Awaiting Quotation From Technician', tone: 'amber' },
+  { key: 'quotation_approval_pending', label: 'Quotation Received – Approval Pending', tone: 'amber' },
+  { key: 'repair_in_progress', label: 'Repair Approved / In Progress', tone: 'blue' },
+  { key: 'awaiting_spares', label: 'Awaiting Spare Parts', tone: 'amber' },
+  { key: 'ready', label: 'Ready for Collection', tone: 'cyan' },
+  { key: 'ready_to_send', label: 'Ready to Send to Customer', tone: 'cyan' },
+  { key: 'delivered', label: 'Sent to Customer', tone: 'emerald' },
+  { key: 'replacement_given', label: 'Replacement Given', tone: 'emerald' },
+  { key: 'credit_note_pending', label: 'Credit Note Pending', tone: 'amber' },
+  { key: 'credit_note_approved', label: 'Credit Note Approved', tone: 'amber' },
+  { key: 'credit_note', label: 'Credit Note Issued', tone: 'emerald' },
+  { key: 'not_repairable', label: 'Not Possible to Repair', tone: 'red' },
+  { key: 'out_of_warranty', label: 'Out of Warranty', tone: 'red' },
+  { key: 'no_supplier_warranty', label: 'No Supplier Warranty', tone: 'red' },
+  { key: 'not_our_stock', label: 'Not Our Stock', tone: 'red' },
+  { key: 'on_hold', label: 'On Hold', tone: 'slate' },
+  { key: 'reopened', label: 'Case Reopened', tone: 'blue' },
+  { key: 'closed', label: 'Case Closed', tone: 'emerald' }
 ];
 
 export const RMA_STATUS_KEYS = RMA_STATUSES.map((s) => s.key);
 export const DEFAULT_RMA_STATUS = 'received';
 
 // A case still needs someone to do something about it. Drives the nav badge and the default filter.
-export const RMA_CLOSED_STATUSES = ['delivered', 'credit_note', 'closed', 'rejected'];
+// Only the four true end-states count as finished: a rejection or an out-of-warranty call still
+// leaves a unit on the shelf to hand back, so those stay OPEN until the case is actually closed.
+export const RMA_CLOSED_STATUSES = ['delivered', 'replacement_given', 'credit_note', 'closed'];
 export const isRmaOpen = (rmaCase) => !RMA_CLOSED_STATUSES.includes(rmaCase?.status);
 
 // Generic "find by key, or fall back to something displayable" — every enum below uses this shape.
@@ -42,17 +61,57 @@ export const RMA_TONE_CLASSES = {
 export const rmaStatusClasses = (key) => RMA_TONE_CLASSES[rmaStatus(key).tone] || RMA_TONE_CLASSES.slate;
 
 export const RMA_CUSTOMER_TYPES = [
-  { key: 'export', label: 'Export customer' },
-  { key: 'marketplace', label: 'Market place' },
-  { key: 'local', label: 'Local market' }
+  { key: 'own_stock', label: 'Own Stock' },
+  { key: 'amazon', label: 'Market Place (Amazon)' },
+  { key: 'noon', label: 'Market Place (Noon)' },
+  { key: 'microless', label: 'Market Place (Microless)' },
+  { key: 'carrefour', label: 'Market Place (Carrefour)' },
+  { key: 'pc_souq', label: 'PC Souq' },
+  { key: 'retail_local', label: 'Retail Customer (Local)' },
+  { key: 'export', label: 'Export Customer' },
+  { key: 'corporate', label: 'Corporate Customer' },
+  { key: 'graba2z', label: 'GrabA2Z Customer' }
 ];
 export const rmaCustomerTypeLabel = (key) => labelOf(RMA_CUSTOMER_TYPES, key);
 
 export const RMA_WARRANTY_STATUSES = [
-  { key: 'in_warranty', label: 'In warranty' },
-  { key: 'out_of_warranty', label: 'Out of warranty' },
-  { key: 'extended', label: 'Extended warranty' },
-  { key: 'unknown', label: 'Unknown' }
+  { key: 'in_warranty', label: 'In Warranty' },
+  { key: 'out_of_warranty', label: 'Out Of Warranty' },
+  { key: 'cegtllc', label: 'CEGTLLC Warranty' },
+  { key: 'us_warranty', label: 'US Warranty' },
+  { key: 'no_warranty', label: 'No Warranty' }
+];
+
+// Who the warranty is claimed through. "Local Market" is the catch-all, so it asks for the actual
+// supplier's name (warrantyFromSupplier) — every other option already IS the supplier.
+export const RMA_WARRANTY_SOURCES = [
+  { key: 'local_market', label: 'Local Market' },
+  { key: 'cegtllc', label: 'CEGTLLC' },
+  { key: 'devin_tech', label: 'Devin Tech' },
+  { key: 'global_horizon', label: 'Global Horizon' },
+  { key: 'gmt_technology', label: 'GMT Technology' },
+  { key: 'levant_distribution', label: 'Levant Distribution' },
+  { key: 'redington_gulf', label: 'Redington Gulf' },
+  { key: 'fdc', label: 'FDC' },
+  { key: 'hyperdist', label: 'Hyperdist' },
+  { key: 'empa', label: 'Empa' },
+  { key: 'metra', label: 'Metra' },
+  { key: 'techbey', label: 'Techbey' }
+];
+
+// Ticked on receipt — any number can apply. Anything these don't cover goes in the free-text
+// physicalCondition field alongside.
+export const RMA_CONDITION_CHECKS = [
+  { key: 'open_screws', label: 'Open Screws' },
+  { key: 'minor_scratches', label: 'Minor Scratches' },
+  { key: 'major_scratches', label: 'Major Scratches' },
+  { key: 'body_damage', label: 'Body Damage / Dent' },
+  { key: 'display_damage', label: 'Display Issue / Damage' },
+  { key: 'missing_accessories', label: 'Missing Accessories' },
+  { key: 'missing_parts', label: 'Missing Parts' },
+  { key: 'only_laptop_received', label: 'Only Laptop Received' },
+  { key: 'full_box_received', label: 'Full Box Received' },
+  { key: 'only_laptop', label: 'Only Laptop' }
 ];
 
 export const RMA_QUOTE_DECISIONS = [
@@ -134,6 +193,7 @@ export const RMA_FORM_FIELDS = [
   { header: 'PART DESCRIPTION', key: 'productName', kind: 'text' },
   { header: 'SERIAL #', key: 'serials', kind: 'serials' },
   { header: 'CUSTOMER COMPLAINT', key: 'complaint', kind: 'text' },
+  { header: 'CONDITION CHECKLIST', key: 'conditionTags', kind: 'tags', options: RMA_CONDITION_CHECKS },
   { header: 'PRODUCT CONDITION', key: 'physicalCondition', kind: 'text' },
   { header: 'CE INVOICE #', key: 'saleInvoiceNo', kind: 'text' },
   { header: 'CE INVOICE DATE', key: 'saleDate', kind: 'date' },
@@ -142,6 +202,8 @@ export const RMA_FORM_FIELDS = [
   { header: 'SUPPLIER INVOICE DATE', key: 'supplierInvoiceDate', kind: 'date' },
   { header: 'SERVICE PROVIDER', key: 'serviceProvider', kind: 'text' },
   { header: 'WARRANTY STATUS', key: 'warrantyStatus', kind: 'enum', options: RMA_WARRANTY_STATUSES },
+  { header: 'WARRANTY FROM', key: 'warrantyFrom', kind: 'enum', options: RMA_WARRANTY_SOURCES },
+  { header: 'WARRANTY FROM SUPPLIER', key: 'warrantyFromSupplier', kind: 'text' },
   { header: 'REPAIR METHOD', key: 'repairMethod', kind: 'enum', options: RMA_REPAIR_METHODS },
   { header: 'SELF-CHECK BY', key: 'selfCheckBy', kind: 'text' },
   { header: 'SERVICE CENTER TICKET #', key: 'serviceCenterTicketNo', kind: 'text' },
@@ -175,10 +237,9 @@ export const RMA_TEXT_COLUMNS = RMA_FORM_FIELDS.map((f, i) => (RMA_TEXT_KEYS.has
 // renders from and the sensible default status.
 export const blankRmaCase = () =>
   Object.fromEntries([
-    ...RMA_FORM_FIELDS.map((f) => [f.key, f.kind === 'serials' ? [] : '']),
+    ...RMA_FORM_FIELDS.map((f) => [f.key, f.kind === 'serials' || f.kind === 'tags' ? [] : '']),
     ['status', DEFAULT_RMA_STATUS],
     ['quoteDecision', 'none'],
-    ['warrantyStatus', 'unknown'],
     ['resolutionType', 'none'],
     ['timeline', []],
     ['productId', ''],
@@ -193,6 +254,7 @@ export const rmaFieldToCell = (field, rmaCase) => {
   if (field.kind === 'enum') return v ? labelOf(field.options, v) : '';
   if (field.kind === 'date') return v ? rmaDisplayDate(v) : '';
   if (field.kind === 'serials') return (v || []).join(', ');
+  if (field.kind === 'tags') return (v || []).map((k) => labelOf(field.options, k)).join(', ');
   return v || '';
 };
 
@@ -218,8 +280,13 @@ export const rmaStatusStack = (rmaCase) => {
 // silently rewritten.
 export const rmaFieldFromRow = (field, raw) => {
   const text = String(raw || '').trim();
-  if (!text) return field.kind === 'serials' ? [] : '';
+  if (!text) return field.kind === 'serials' || field.kind === 'tags' ? [] : '';
   if (field.kind === 'enum') return findByLabel(field.options, text)?.key || text;
+  if (field.kind === 'tags') {
+    // Same rule as an enum, per item: a known label becomes its key, anything else is kept as typed.
+    const items = text.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+    return [...new Set(items.map((s) => findByLabel(field.options, s)?.key || s))];
+  }
   if (field.kind === 'date') return parseRmaDate(text);
   if (field.kind === 'serials') {
     return [...new Set(text.split(/[\s/,;|]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];

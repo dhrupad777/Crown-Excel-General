@@ -35,6 +35,7 @@ import { useAuth } from '../context/AuthContext';
 import { storageService } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
+import { matchesProductQuery } from '../utils/productSearch';
 import { customerPrimaryName, customerSecondaryName } from '../utils/customer';
 
 export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) => {
@@ -305,11 +306,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
   // Product Manual Search Autocomplete
   useEffect(() => {
     if (productSearchQuery.trim().length > 0) {
-      const results = storageService.getProducts().filter(p =>
-        p.name?.toLowerCase().includes(productSearchQuery.toLowerCase()) ||
-        p.barcode?.includes(productSearchQuery) ||
-        p.category?.toLowerCase().includes(productSearchQuery.toLowerCase())
-      );
+      const results = storageService.getProducts().filter(p => matchesProductQuery(p, productSearchQuery));
       setProductResults(results);
       setShowProductDropdown(true);
     } else {

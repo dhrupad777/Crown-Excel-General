@@ -422,7 +422,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
         <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
 
           {/* Instant Search Box */}
-          <div className="relative w-full lg:w-96">
+          <div className="relative w-full lg:flex-1 lg:min-w-[20rem]">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"

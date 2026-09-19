@@ -23,6 +23,7 @@ import { Modal } from '../components/Modal';
 import { ImportExcelModal } from '../components/ImportExcelModal';
 import TeamTag from '../components/TeamTag';
 import { guessProductDefaults } from '../utils/productDefaults';
+import { matchesProductQuery } from '../utils/productSearch';
 import { importProducts, PRODUCT_TEMPLATE_HEADERS } from '../utils/importUtils';
 import { exportToCsv, exportToXlsx, exportToPdf, formatLocalDate } from '../utils/exportUtils';
 import { useAuth } from '../context/AuthContext';
@@ -68,16 +69,7 @@ export const ProductsManager = () => {
     if (selectedCategory !== 'All' && p.category !== selectedCategory) {
       return false;
     }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      return (
-        p.name?.toLowerCase().includes(q) ||
-        p.barcode?.toLowerCase().includes(q) ||
-        p.sku?.toLowerCase().includes(q) ||
-        p.category?.toLowerCase().includes(q)
-      );
-    }
-    return true;
+    return matchesProductQuery(p, searchQuery);
   });
 
   const categories = ['All', 'Laptops', 'Mobile Phones', 'Tablets', 'Audio & Wearables', 'Accessories', 'Gaming', 'Peripherals', 'General'];

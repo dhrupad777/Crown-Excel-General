@@ -268,7 +268,6 @@ export const importRmaCases = async (rows, { onDuplicate = 'skip', defaultTeamId
       ...values,
       status: values.status || DEFAULT_RMA_STATUS,
       quoteDecision: values.quoteDecision || 'none',
-      warrantyStatus: values.warrantyStatus || 'unknown',
       resolutionType: values.resolutionType || 'none',
       teamId: region.teamId || undefined
     };

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   RMA_FORM_FIELDS, blankRmaCase, rmaFieldToCell, rmaFieldFromRow, parseRmaDate, rmaDisplayDate,
-  rmaDisplayDateTime, rmaStatusStack, isRmaOpen, rmaStatus
+  rmaDisplayDateTime, rmaStatusStack, isRmaOpen, rmaStatus, rmaCustomerTypeLabel
 } from './rma';
 
 describe('RMA form fields round-trip through Excel', () => {
@@ -10,12 +10,16 @@ describe('RMA form fields round-trip through Excel', () => {
       ...blankRmaCase(),
       rmaNo: 'RMA-2026-09-001',
       status: 'with_technician',
-      customerType: 'marketplace',
+      customerType: 'amazon',
       serials: ['ABC123', 'DEF456'],
       saleDate: parseRmaDate('05-09-2026'),
       repairMethod: 'service_center',
       resolutionType: 'replacement',
-      replacementDate: parseRmaDate('10-09-2026')
+      replacementDate: parseRmaDate('10-09-2026'),
+      conditionTags: ['open_screws', 'only_laptop_received'],
+      warrantyStatus: 'cegtllc',
+      warrantyFrom: 'local_market',
+      warrantyFromSupplier: 'Al Ain Traders'
     };
     for (const field of RMA_FORM_FIELDS) {
       if (field.kind === 'photo') continue; // a URL isn't meant to round-trip back into a value
@@ -27,7 +31,15 @@ describe('RMA form fields round-trip through Excel', () => {
 
   it('an enum cell accepts the label text our own export writes, not just the raw key', () => {
     const statusField = RMA_FORM_FIELDS.find((f) => f.key === 'status');
-    expect(rmaFieldFromRow(statusField, 'With supplier')).toBe('with_supplier');
+    expect(rmaFieldFromRow(statusField, 'With Service Centre')).toBe('with_service_centre');
+  });
+
+  it('the condition checklist exports as labels and reads back as keys; unknown wording is kept as typed', () => {
+    const tagsField = RMA_FORM_FIELDS.find((f) => f.key === 'conditionTags');
+    expect(rmaFieldToCell(tagsField, { conditionTags: ['open_screws', 'body_damage'] })).toBe('Open Screws, Body Damage / Dent');
+    expect(rmaFieldFromRow(tagsField, 'open screws, Charger cable frayed, Open Screws'))
+      .toEqual(['open_screws', 'Charger cable frayed']);
+    expect(rmaFieldFromRow(tagsField, '')).toEqual([]);
   });
 
   it('a blank cell yields an empty value, and an empty serial cell yields an empty list', () => {
@@ -97,22 +109,39 @@ describe('rmaStatusStack — the RMA STATUS column, as the reference sheet packe
     };
     const cell = rmaStatusStack(rmaCase);
     const lines = cell.split('\n');
-    expect(lines[0]).toBe('Case closed');
+    expect(lines[0]).toBe('Case Closed');
     expect(lines[1]).toBe('');
     expect(lines[2]).toMatch(/^15-07-2026 \d{2}:\d{2} - LAPTOP RCVD FROM TECHCHIP SHOP$/);
     expect(lines[3]).toMatch(/^03-08-2026 \d{2}:\d{2} - RCVD CN FROM SUPPLIER$/);
   });
 
   it('still shows just the current status when nothing has been logged yet', () => {
-    expect(rmaStatusStack({ status: 'received', timeline: [] })).toBe('Unit received\n');
+    expect(rmaStatusStack({ status: 'received', timeline: [] })).toBe('RMA Received & Under Review\n');
   });
 });
 
 describe('isRmaOpen — the tracker default filter', () => {
-  it('closed/delivered/credit-noted/rejected cases are not open; everything else is', () => {
+  it('only the four end-states close a case: closed, sent to customer, replacement given, credit note issued', () => {
     expect(isRmaOpen({ status: 'closed' })).toBe(false);
     expect(isRmaOpen({ status: 'delivered' })).toBe(false);
+    expect(isRmaOpen({ status: 'replacement_given' })).toBe(false);
+    expect(isRmaOpen({ status: 'credit_note' })).toBe(false);
     expect(isRmaOpen({ status: 'with_technician' })).toBe(true);
     expect(rmaStatus('unknown_key').label).toBe('unknown_key'); // never throws on a bad status
+  });
+
+  // A rejection is a decision, not an ending — the unit is still on the shelf waiting to go back.
+  it('a rejected or out-of-warranty case stays open until someone actually closes it', () => {
+    for (const status of ['warranty_rejected', 'not_repairable', 'out_of_warranty', 'no_supplier_warranty', 'not_our_stock', 'reopened']) {
+      expect(isRmaOpen({ status })).toBe(true);
+    }
+  });
+
+  // The three cases already live in production hold these keys; renaming any of them would orphan
+  // real data behind a raw key instead of a label.
+  it('keeps every key live cases already use', () => {
+    expect(rmaStatus('received').label).toBe('RMA Received & Under Review');
+    expect(rmaStatus('on_hold').label).toBe('On Hold');
+    expect(rmaCustomerTypeLabel('export')).toBe('Export Customer');
   });
 });
