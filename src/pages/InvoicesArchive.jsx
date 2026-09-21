@@ -419,28 +419,28 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
       {/* Queryable Search Bar & Filters */}
       <div className="bg-white border-2 border-slate-300 rounded-2xl p-5 space-y-4 shadow-sm">
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
+        {/* Instant Search Box — its own full-width line so long queries (serials, partner names) stay readable */}
+        <div className="relative w-full">
+          <Search className="w-5 h-5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by Invoice #, Partner, Serial #, Item..."
+            className="input-field pl-11 pr-20 py-3.5 text-base bg-white border-slate-400 focus:border-[#2563eb] font-bold text-slate-900 w-full rounded-xl shadow-inner"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 hover:text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg"
+            >
+              Clear
+            </button>
+          )}
+        </div>
 
-          {/* Instant Search Box */}
-          <div className="relative w-full lg:flex-1 lg:min-w-[20rem]">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by Invoice #, Partner, Serial #, Item..."
-              className="input-field pl-10 pr-16 py-3 text-sm bg-white border-slate-400 focus:border-[#2563eb] font-bold text-slate-900 w-full rounded-xl shadow-inner"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 hover:text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg"
-              >
-                Clear
-              </button>
-            )}
-          </div>
-
+        {/* Filters — team and sort on the left, date range on the right (wraps below on narrow desktops) */}
+        <div className="flex flex-col lg:flex-row lg:flex-wrap items-stretch lg:items-center gap-3">
           {isAdmin && (
             <select
               value={teamFilter}
@@ -458,7 +458,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
           {/* Date sort direction — newest-first by default. */}
           <button
             onClick={() => setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))}
-            className="input-field py-3 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl flex items-center gap-2 whitespace-nowrap hover:border-[#2563eb]"
+            className="input-field py-3 px-3 text-sm bg-white border-slate-400 font-bold text-slate-800 rounded-xl flex items-center justify-center gap-2 whitespace-nowrap hover:border-[#2563eb] w-full lg:w-auto"
             title="Toggle date order"
           >
             <ArrowDownUp className="w-4 h-4 text-slate-500" />
@@ -467,7 +467,7 @@ export const InvoicesArchive = ({ initialInvoiceId }) => {
 
           {/* Date Range Tabs — the calendar popover is rendered outside the
               overflow-x-auto container so it isn't clipped by the scroll boundary. */}
-          <div className="relative" ref={calendarPopoverRef}>
+          <div className="relative lg:ml-auto" ref={calendarPopoverRef}>
             <div className="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border-2 border-slate-300 w-full lg:w-auto overflow-x-auto shadow-inner">
               {[
                 { id: 'all', label: 'All Records' },
