@@ -8,7 +8,8 @@ import autoTable from 'jspdf-autotable';
 import { downloadBlob } from './download';
 import { writeStyledWorkbook } from './excelWriter';
 import {
-  RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaStatusStack, rmaDisplayDateTime
+  RMA_FORM_FIELDS, RMA_FORM_HEADERS, RMA_TEXT_COLUMNS, rmaFieldToCell, rmaStatusStack, rmaDisplayDateTime,
+  rmaStatus
 } from '../config/rma';
 
 export { downloadBlob };
@@ -131,19 +132,20 @@ export const buildRmaExportSheets = (cases) => ({
   },
   log: {
     name: 'Case Log',
-    headers: ['RMA-NO', 'Date & Time', 'Visibility', 'Entry', 'Logged By'],
+    headers: ['RMA-NO', 'Date & Time', 'Entry', 'Status Change', 'Logged By'],
     rows: cases.flatMap((c) =>
       [...(c.timeline || [])]
         .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
         .map((e) => [
           c.rmaNo || '',
           rmaDisplayDateTime(e.date),
-          e.internal ? 'Internal' : 'Customer-facing',
           e.text || '',
+          e.statusFrom && e.statusTo ? `${rmaStatus(e.statusFrom).label} → ${rmaStatus(e.statusTo).label}` : '',
           e.byName || e.by || ''
         ])
     ),
-    colWidths: [20, 18, 18, 80, 22]
+    // One width per header — excelWriter maps these positionally, so a mismatch misaligns the sheet.
+    colWidths: [20, 18, 80, 40, 22]
   }
 });
 

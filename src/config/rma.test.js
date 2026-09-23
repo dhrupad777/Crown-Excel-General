@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   RMA_FORM_FIELDS, blankRmaCase, rmaFieldToCell, rmaFieldFromRow, parseRmaDate, rmaDisplayDate,
-  rmaDisplayDateTime, rmaStatusStack, isRmaOpen, rmaStatus, rmaCustomerTypeLabel
+  rmaDisplayDateTime, rmaStatusStack, isRmaOpen, rmaStatus, rmaCustomerTypeLabel,
+  isRmaConcluded, rmaStatusChangeText, RMA_WARRANTY_SOURCES, RMA_WARRANTY_SOURCES_LEGACY,
+  rmaWarrantySourceOptions
 } from './rma';
+
+const warrantyFromField = RMA_FORM_FIELDS.find((f) => f.key === 'warrantyFrom');
 
 describe('RMA form fields round-trip through Excel', () => {
   it('an export cell can be read back into the same field value (text, enum, date, serials)', () => {
@@ -18,7 +22,7 @@ describe('RMA form fields round-trip through Excel', () => {
       replacementDate: parseRmaDate('10-09-2026'),
       conditionTags: ['open_screws', 'only_laptop_received'],
       warrantyStatus: 'cegtllc',
-      warrantyFrom: 'local_market',
+      warrantyFrom: 'local_supplier',
       warrantyFromSupplier: 'Al Ain Traders'
     };
     for (const field of RMA_FORM_FIELDS) {
@@ -103,8 +107,8 @@ describe('rmaStatusStack — the RMA STATUS column, as the reference sheet packe
     const rmaCase = {
       status: 'closed',
       timeline: [
-        { id: '2', date: '2026-08-03T09:00:00.000Z', text: 'RCVD CN FROM SUPPLIER', internal: false },
-        { id: '1', date: '2026-07-15T11:30:00.000Z', text: 'LAPTOP RCVD FROM TECHCHIP SHOP', internal: false }
+        { id: '2', date: '2026-08-03T09:00:00.000Z', text: 'RCVD CN FROM SUPPLIER' },
+        { id: '1', date: '2026-07-15T11:30:00.000Z', text: 'LAPTOP RCVD FROM TECHCHIP SHOP' }
       ]
     };
     const cell = rmaStatusStack(rmaCase);
@@ -143,5 +147,75 @@ describe('isRmaOpen — the tracker default filter', () => {
     expect(rmaStatus('received').label).toBe('RMA Received & Under Review');
     expect(rmaStatus('on_hold').label).toBe('On Hold');
     expect(rmaCustomerTypeLabel('export')).toBe('Export Customer');
+  });
+});
+
+// Concluded freezes the case outright; open only drives the default filter and the nav badge. They
+// must NOT be merged: handing the unit back is not the same act as concluding the paperwork.
+describe('isRmaConcluded — the freeze', () => {
+  it('is true only for a case someone deliberately closed', () => {
+    expect(isRmaConcluded({ status: 'closed' })).toBe(true);
+    expect(isRmaConcluded({ status: 'delivered' })).toBe(false);
+    expect(isRmaConcluded({ status: 'replacement_given' })).toBe(false);
+    expect(isRmaConcluded({ status: 'credit_note' })).toBe(false);
+    expect(isRmaConcluded({ status: 'received' })).toBe(false);
+    expect(isRmaConcluded({ status: 'Awaiting Customer Pickup' })).toBe(false);
+    expect(isRmaConcluded(undefined)).toBe(false);
+  });
+
+  it('disagrees with isRmaOpen on the three hand-back end-states', () => {
+    for (const status of ['delivered', 'replacement_given', 'credit_note']) {
+      expect(isRmaOpen({ status })).toBe(false);
+      expect(isRmaConcluded({ status })).toBe(false);
+    }
+  });
+});
+
+describe('rmaStatusChangeText — what a status move writes into the log', () => {
+  it('names both ends of the move', () => {
+    expect(rmaStatusChangeText('delivered', 'closed'))
+      .toBe('Status moved from “Sent to Customer” to “Case Closed”');
+  });
+
+  it('reads sensibly, and never throws, for a status an imported sheet worded itself', () => {
+    expect(rmaStatusChangeText('Awaiting Customer Pickup', 'closed'))
+      .toBe('Status moved from “Awaiting Customer Pickup” to “Case Closed”');
+  });
+});
+
+describe('Warranty From — four channels, with the retired distributor list kept readable', () => {
+  it('offers exactly the four current options, in order', () => {
+    expect(RMA_WARRANTY_SOURCES.map((o) => o.key)).toEqual(['local_supplier', 'local_distributor', 'us_supplier', 'other']);
+    expect(RMA_WARRANTY_SOURCES.map((o) => o.label)).toEqual(['Local Supplier', 'Local Distributor', 'US Supplier', 'Other']);
+  });
+
+  // findByLabel resolves an imported cell by label, so a collision would make an import ambiguous.
+  it('shares no key and no label with the retired list', () => {
+    for (const current of RMA_WARRANTY_SOURCES) {
+      expect(RMA_WARRANTY_SOURCES_LEGACY.some((o) => o.key === current.key)).toBe(false);
+      expect(RMA_WARRANTY_SOURCES_LEGACY.some((o) => o.label.toLowerCase() === current.label.toLowerCase())).toBe(false);
+    }
+  });
+
+  it('a case saved under a retired option still exports as its own label and imports back', () => {
+    expect(rmaFieldToCell(warrantyFromField, { warrantyFrom: 'redington_gulf' })).toBe('Redington Gulf');
+    expect(rmaFieldFromRow(warrantyFromField, 'Redington Gulf')).toBe('redington_gulf');
+  });
+
+  it('a current option round-trips through Excel', () => {
+    expect(rmaFieldToCell(warrantyFromField, { warrantyFrom: 'us_supplier' })).toBe('US Supplier');
+    expect(rmaFieldFromRow(warrantyFromField, 'US Supplier')).toBe('us_supplier');
+  });
+
+  it('the picker shows the four, plus whatever a saved case actually holds', () => {
+    expect(rmaWarrantySourceOptions('')).toHaveLength(4);
+    expect(rmaWarrantySourceOptions('us_supplier')).toHaveLength(4);
+
+    const legacy = rmaWarrantySourceOptions('redington_gulf');
+    expect(legacy).toHaveLength(5);
+    expect(legacy[4]).toEqual({ key: 'redington_gulf', label: 'Redington Gulf' });
+
+    // A sheet's own free-text wording is shown verbatim rather than dropped.
+    expect(rmaWarrantySourceOptions('Some Random Shop')[4].label).toBe('Some Random Shop');
   });
 });

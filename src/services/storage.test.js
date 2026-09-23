@@ -967,3 +967,102 @@ describe('voiding reports failure honestly', () => {
     expect(res.ok).toBe(false);
   });
 });
+
+// The log is the only thing that can change about a case once it exists, so its rules — what makes
+// an entry, who it is stamped with, and the point past which nothing may change — are load-bearing.
+describe('RMA case log', () => {
+  const seedCase = (over = {}) => {
+    localStorage.setItem('crown_excel_rma_v2', JSON.stringify([{
+      id: 'rma-1', rmaNo: 'RMA-2026-09-001', teamId: 'Dubai', status: 'received',
+      customerName: 'ACME', serials: ['SN1'], timeline: [], ...over
+    }]));
+  };
+
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'staff@b.com', displayName: 'Nitesh', role: 'standard', locationId: 'loc-1' });
+    seedCase();
+  });
+
+  it('appends a typed note, stamped with who wrote it, leaving the status alone', async () => {
+    const saved = await storageService.appendRmaEntry('rma-1', { text: '  Sent to the service centre  ' });
+    expect(saved.timeline).toHaveLength(1);
+    expect(saved.timeline[0]).toMatchObject({
+      text: 'Sent to the service centre', statusFrom: '', statusTo: '', by: 'staff@b.com', byName: 'Nitesh'
+    });
+    expect(saved.status).toBe('received');
+  });
+
+  it('a status move with an empty note logs itself and moves the case', async () => {
+    const saved = await storageService.appendRmaEntry('rma-1', { text: '', status: 'ready' });
+    expect(saved.status).toBe('ready');
+    expect(saved.timeline[0]).toMatchObject({ statusFrom: 'received', statusTo: 'ready', byName: 'Nitesh' });
+    expect(saved.timeline[0].text).toBe('Status moved from “RMA Received & Under Review” to “Ready for Collection”');
+  });
+
+  // The register sheet's STATUS cell is built from the entry text alone, so a move recorded only in
+  // statusFrom/statusTo would be missing from the record the client actually reads.
+  it('a note AND a move in one entry keeps both in the text', async () => {
+    const saved = await storageService.appendRmaEntry('rma-1', { text: 'Repair done, tested', status: 'ready' });
+    expect(saved.timeline[0].text).toBe('Repair done, tested — Status moved from “RMA Received & Under Review” to “Ready for Collection”');
+    expect(saved.timeline[0].statusTo).toBe('ready');
+  });
+
+  it('refuses an entry that is neither a note nor a move', async () => {
+    expect(() => storageService.appendRmaEntry('rma-1', { text: '   ' })).toThrow(/note.*status/i);
+    // Re-submitting the status the case already has is not a move, so it cannot stand in for a note.
+    expect(() => storageService.appendRmaEntry('rma-1', { text: '', status: 'received' })).toThrow(/note.*status/i);
+    expect(storageService.getRmaCase('rma-1').timeline).toHaveLength(0);
+  });
+
+  it('an unknown status key changes nothing and manufactures no entry', () => {
+    expect(() => storageService.appendRmaEntry('rma-1', { text: '', status: 'not_a_real_status' })).toThrow();
+    expect(storageService.getRmaCase('rma-1')).toMatchObject({ status: 'received', timeline: [] });
+  });
+
+  it('a closed case takes nothing further, and is left exactly as it was', () => {
+    seedCase({ status: 'closed', timeline: [{ id: 'e1', date: '2026-09-01T10:00:00.000Z', text: 'done' }] });
+    expect(() => storageService.appendRmaEntry('rma-1', { text: 'one more thing' })).toThrow(/closed/i);
+    expect(() => storageService.appendRmaEntry('rma-1', { text: '', status: 'reopened' })).toThrow(/closed/i);
+    expect(storageService.getRmaCase('rma-1')).toMatchObject({ status: 'closed', timeline: [{ id: 'e1' }] });
+  });
+
+  // The freeze is 'closed' only — handing the unit back drops a case off the Open tab but must not
+  // stop anyone recording what happened next.
+  it('a delivered case still accepts entries', async () => {
+    seedCase({ status: 'delivered' });
+    const saved = await storageService.appendRmaEntry('rma-1', { text: 'Customer confirmed receipt' });
+    expect(saved.timeline).toHaveLength(1);
+  });
+
+  it('closing works, and the very next entry is refused', async () => {
+    const saved = await storageService.appendRmaEntry('rma-1', { text: '', status: 'closed' });
+    expect(saved.status).toBe('closed');
+    expect(() => storageService.appendRmaEntry('rma-1', { text: 'too late' })).toThrow(/closed/i);
+  });
+
+  it('leaves an older entry’s retired internal flag untouched', async () => {
+    seedCase({ timeline: [{ id: 'old', date: '2026-08-01T10:00:00.000Z', text: 'legacy', internal: true }] });
+    const saved = await storageService.appendRmaEntry('rma-1', { text: 'new note' });
+    expect(saved.timeline[0]).toMatchObject({ id: 'old', internal: true });
+    expect(saved.timeline[1].internal).toBeUndefined();
+  });
+
+  it('falls back to the email when an account has no display name', async () => {
+    storageService.setCurrentUser({ email: 'noname@b.com', role: 'standard', locationId: 'loc-1' });
+    const saved = await storageService.appendRmaEntry('rma-1', { text: 'anon' });
+    expect(saved.timeline[0].byName).toBe('noname@b.com');
+  });
+
+  // The admin Excel import writes whole cases through saveRmaCase and is the only correction path
+  // left for a frozen case — freezing THAT would close the last door.
+  it('saving a closed case directly still works, so the Excel import can correct one', () => {
+    seedCase({ status: 'closed' });
+    const saved = storageService.saveRmaCase({ ...storageService.getRmaCase('rma-1'), customerName: 'ACME LLC' });
+    expect(saved.customerName).toBe('ACME LLC');
+  });
+
+  it('refuses an entry on a case that no longer exists', () => {
+    expect(() => storageService.appendRmaEntry('rma-nope', { text: 'hello' })).toThrow(/no longer exists/i);
+  });
+});

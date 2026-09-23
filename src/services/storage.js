@@ -4,7 +4,7 @@
 
 import { firebaseService, serverTimestamp } from './firebase';
 import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS, normalizePermissions } from '../config/appConfig';
-import { RMA_STATUS_KEYS, DEFAULT_RMA_STATUS, isRmaOpen } from '../config/rma';
+import { RMA_STATUS_KEYS, DEFAULT_RMA_STATUS, isRmaOpen, isRmaConcluded, rmaStatusChangeText } from '../config/rma';
 import { idbPutBundle, idbGetBundle, idbDeleteBundle } from '../utils/backupStore';
 
 const STORAGE_KEYS = {
@@ -1855,30 +1855,45 @@ class StorageService {
     return this._archive(STORAGE_KEYS.RMA, 'rmaCases', id, reason);
   }
 
-  // Appends one dated entry to a case's log. The client's sheet kept two parallel logs (customer-
-  // facing and internal) that had already drifted apart; here it is one list and `internal` is a
-  // flag, so the same event is never typed twice. Entries are never edited or removed.
-  appendRmaEntry(id, { text, internal = false, date, status } = {}) {
+  // Appends one dated entry to a case's log — the only thing that can change about a case once it
+  // has been created, alongside the status move an entry can carry. Entries are never edited or
+  // removed, and a concluded case takes neither. The case is re-read here rather than trusted from
+  // the caller, so a tab left open since before someone else closed the case is refused.
+  appendRmaEntry(id, { text, date, status } = {}) {
     const body = String(text || '').trim();
-    if (!body) throw new Error('A log entry needs some text.');
     const rmaCase = this.getRmaCase(id);
     if (!rmaCase) throw new Error('That RMA case no longer exists.');
+    if (isRmaConcluded(rmaCase)) {
+      throw new Error(`RMA ${rmaCase.rmaNo || ''} is closed. A closed case is final — its status and log cannot be changed.`);
+    }
 
+    // `!== current` matters: a stale second terminal can submit the status the case already has,
+    // which is not a move and must not log one.
+    const moved = Boolean(status) && RMA_STATUS_KEYS.includes(status) && status !== rmaCase.status;
+    if (!body && !moved) throw new Error('Add a note, or choose a new status.');
+
+    // A move always says so in the text, even when the operator also typed a note: the register
+    // sheet's STATUS cell is built from `text` alone (see rmaStatusStack), so a move recorded only
+    // in statusFrom/statusTo would be missing from the record the client actually reads.
+    const moveText = moved ? rmaStatusChangeText(rmaCase.status, status) : '';
     const user = this._currentUser || {};
     const entry = {
       id: this._newId('rmalog'),
       date: date || new Date().toISOString(),
-      text: body,
-      internal: Boolean(internal),
+      text: body && moveText ? `${body} — ${moveText}` : body || moveText,
+      statusFrom: moved ? rmaCase.status : '',
+      statusTo: moved ? status : '',
       by: user.email || '',
-      byName: user.displayName || ''
+      byName: user.displayName || user.email || ''
     };
 
-    return this.saveRmaCase({
+    const saved = this.saveRmaCase({
       ...rmaCase,
-      status: status && RMA_STATUS_KEYS.includes(status) ? status : rmaCase.status,
+      status: moved ? status : rmaCase.status,
       timeline: [...(rmaCase.timeline || []), entry]
     }, { confirm: true });
+    if (!saved) throw new Error('Could not save the entry — this device is out of storage space.');
+    return saved;
   }
 
   // Given a serial, pull everything the sale already knows so nobody retypes it. Uses checkSerials

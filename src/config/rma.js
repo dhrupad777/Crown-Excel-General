@@ -42,12 +42,24 @@ export const DEFAULT_RMA_STATUS = 'received';
 export const RMA_CLOSED_STATUSES = ['delivered', 'replacement_given', 'credit_note', 'closed'];
 export const isRmaOpen = (rmaCase) => !RMA_CLOSED_STATUSES.includes(rmaCase?.status);
 
+// Concluded is NOT the same thing as not-open, and the two must not be merged. Handing the unit
+// back closes the Open tab; only someone deliberately setting "Case Closed" concludes the case, and
+// a concluded case is frozen for good — no further status move, no further log entry, by anyone.
+export const isRmaConcluded = (rmaCase) => rmaCase?.status === 'closed';
+
 // Generic "find by key, or fall back to something displayable" — every enum below uses this shape.
 const findByKey = (list, key, fallbackLabel) => list.find((o) => o.key === key) || { key, label: fallbackLabel ?? key ?? '—' };
 const labelOf = (list, key) => findByKey(list, key).label;
 const findByLabel = (list, label) => list.find((o) => o.label.toLowerCase() === String(label || '').trim().toLowerCase());
 
 export const rmaStatus = (key) => findByKey(RMA_STATUSES, key);
+
+// The sentence a status move writes into the case log. It lands in a permanent business record and
+// in the exported register sheet, so it is pinned here (and unit-tested) rather than composed at the
+// call site. rmaStatus falls back to the raw value, so a status an imported sheet worded its own way
+// still reads correctly.
+export const rmaStatusChangeText = (fromKey, toKey) =>
+  `Status moved from “${rmaStatus(fromKey).label}” to “${rmaStatus(toKey).label}”`;
 
 // Tailwind classes per tone. Hand-rolled to match the rest of the app.
 export const RMA_TONE_CLASSES = {
@@ -82,9 +94,20 @@ export const RMA_WARRANTY_STATUSES = [
   { key: 'no_warranty', label: 'No Warranty' }
 ];
 
-// Who the warranty is claimed through. "Local Market" is the catch-all, so it asks for the actual
-// supplier's name (warrantyFromSupplier) — every other option already IS the supplier.
+// Who the warranty is claimed through — a channel, not a company, so each one asks for the actual
+// supplier's name alongside (warrantyFromSupplier).
 export const RMA_WARRANTY_SOURCES = [
+  { key: 'local_supplier', label: 'Local Supplier' },
+  { key: 'local_distributor', label: 'Local Distributor' },
+  { key: 'us_supplier', label: 'US Supplier' },
+  { key: 'other', label: 'Other' }
+];
+
+// The named-distributor list this field used to be. Retired from the form, but kept so a case saved
+// under one still exports as "Redington Gulf" rather than a raw key, and so a sheet exported before
+// the change still imports back to the same value. No key or label here collides with the four
+// above, which is what keeps findByLabel unambiguous on import.
+export const RMA_WARRANTY_SOURCES_LEGACY = [
   { key: 'local_market', label: 'Local Market' },
   { key: 'cegtllc', label: 'CEGTLLC' },
   { key: 'devin_tech', label: 'Devin Tech' },
@@ -98,6 +121,16 @@ export const RMA_WARRANTY_SOURCES = [
   { key: 'metra', label: 'Metra' },
   { key: 'techbey', label: 'Techbey' }
 ];
+export const RMA_WARRANTY_SOURCES_ALL = [...RMA_WARRANTY_SOURCES, ...RMA_WARRANTY_SOURCES_LEGACY];
+
+// The options the form's picker shows: the four current ones, plus — only when the case already
+// holds something else — a one-off entry for whatever it holds, so a retired value (or a status
+// wording an imported sheet used) still reads correctly instead of showing blank. Display-only:
+// every field of an existing case is read-only, so a legacy value can never be chosen into a case.
+export const rmaWarrantySourceOptions = (currentValue) =>
+  !currentValue || RMA_WARRANTY_SOURCES.some((o) => o.key === currentValue)
+    ? RMA_WARRANTY_SOURCES
+    : [...RMA_WARRANTY_SOURCES, findByKey(RMA_WARRANTY_SOURCES_ALL, currentValue)];
 
 // Ticked on receipt — any number can apply. Anything these don't cover goes in the free-text
 // physicalCondition field alongside.
@@ -202,7 +235,9 @@ export const RMA_FORM_FIELDS = [
   { header: 'SUPPLIER INVOICE DATE', key: 'supplierInvoiceDate', kind: 'date' },
   { header: 'SERVICE PROVIDER', key: 'serviceProvider', kind: 'text' },
   { header: 'WARRANTY STATUS', key: 'warrantyStatus', kind: 'enum', options: RMA_WARRANTY_STATUSES },
-  { header: 'WARRANTY FROM', key: 'warrantyFrom', kind: 'enum', options: RMA_WARRANTY_SOURCES },
+  // _ALL, not the four current ones: a case saved under a retired option still has to export as its
+  // own label and import back to the same key.
+  { header: 'WARRANTY FROM', key: 'warrantyFrom', kind: 'enum', options: RMA_WARRANTY_SOURCES_ALL },
   { header: 'WARRANTY FROM SUPPLIER', key: 'warrantyFromSupplier', kind: 'text' },
   { header: 'REPAIR METHOD', key: 'repairMethod', kind: 'enum', options: RMA_REPAIR_METHODS },
   { header: 'SELF-CHECK BY', key: 'selfCheckBy', kind: 'text' },

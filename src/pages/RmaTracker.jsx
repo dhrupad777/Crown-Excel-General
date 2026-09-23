@@ -12,8 +12,8 @@ import { importRmaCases } from '../utils/importUtils';
 import { exportRmaXlsx, formatLocalDate } from '../utils/exportUtils';
 import {
   RMA_STATUSES, RMA_CUSTOMER_TYPES, RMA_QUOTE_DECISIONS, RMA_WARRANTY_STATUSES, RMA_RESOLUTION_TYPES,
-  RMA_REPAIR_METHODS, RMA_WARRANTY_SOURCES, RMA_CONDITION_CHECKS, RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel,
-  rmaDisplayDate, isRmaOpen
+  RMA_REPAIR_METHODS, rmaWarrantySourceOptions, RMA_CONDITION_CHECKS, RMA_FORM_HEADERS, blankRmaCase, rmaStatus, rmaStatusClasses, rmaCustomerTypeLabel,
+  rmaDisplayDate, isRmaOpen, isRmaConcluded, rmaStatusChangeText
 } from '../config/rma';
 
 const RENDER_CAP_STEP = 100;
@@ -71,9 +71,9 @@ const Field = ({ label, value, onChange, disabled, textarea, rows = 2, mono, pla
   </div>
 );
 
-const Select = ({ label, value, onChange, disabled, options, blankOption, sub }) => (
+const Select = ({ label, value, onChange, disabled, options, blankOption }) => (
   <div className="form-group mb-0">
-    <label className={LABEL_CLS}>{label} {sub && <span className="text-[9px] normal-case font-bold text-slate-400">({sub})</span>}</label>
+    <label className={LABEL_CLS}>{label}</label>
     <select value={value || ''} disabled={disabled} onChange={(e) => onChange(e.target.value)} className={INPUT_CLS}>
       {blankOption && <option value="">{blankOption}</option>}
       {options.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
@@ -148,10 +148,8 @@ export const RmaTracker = () => {
   const [resolvedNote, setResolvedNote] = useState('');
   const [uploadingPhoto, setUploadingPhoto] = useState(''); // '' | 'condition' | 'creditnote'
   const [logText, setLogText] = useState('');
-  const [logInternal, setLogInternal] = useState(false);
   const [logStatus, setLogStatus] = useState('');
   const [logBusy, setLogBusy] = useState(false);
-  const [logView, setLogView] = useState('all');
   const serialInputRef = useRef(null);
 
   useEffect(() => {
@@ -163,21 +161,31 @@ export const RmaTracker = () => {
     return () => window.removeEventListener('crown-data-change', handleDataChange);
   }, []);
 
-  // Keep the open case in step with live updates from another terminal, without stomping on fields
-  // the operator is mid-edit. Only the timeline is re-read — that is the part someone else appends.
+  // Keep the open case in step with live updates from another terminal. The log and the status are
+  // the only things anyone can change, and neither is ever mid-edit here (the status is chosen in
+  // the composer, not on the draft), so re-reading both stomps on nothing — and without the status,
+  // a case closed on another terminal would leave this tab offering a composer that now throws.
   useEffect(() => {
     if (!draft?.id) return;
     const fresh = cases.find((c) => c.id === draft.id);
-    if (fresh && fresh.timeline?.length !== draft.timeline?.length) {
-      setDraft((d) => (d ? { ...d, timeline: fresh.timeline } : d));
+    if (!fresh) return;
+    if (fresh.timeline?.length !== draft.timeline?.length || fresh.status !== draft.status) {
+      setDraft((d) => (d ? { ...d, timeline: fresh.timeline, status: fresh.status } : d));
     }
-  }, [cases, draft?.id, draft?.timeline?.length]);
+  }, [cases, draft?.id, draft?.timeline?.length, draft?.status]);
 
   const teams = storageService.getTeams();
 
-  // Fields the server allows a non-admin to change only while CREATING; once a case exists, only
-  // an admin can rewrite it (they can still add log entries and move the status, always).
-  const fieldsDisabled = !isAdmin && !isNew;
+  // A case is filled in at the moment it is received; from the save onwards the only things that can
+  // change are its status and its log — for every account, administrators included. (The server rule
+  // is looser than this on purpose: the admin Excel import stays open as the one correction path.)
+  const fieldsDisabled = !isNew;
+
+  // A concluded case is frozen outright: no status move, no log entry, by anyone.
+  const concluded = Boolean(draft) && !isNew && isRmaConcluded(draft);
+  const closedEntry = concluded
+    ? [...(draft.timeline || [])].reverse().find((e) => e.statusTo === 'closed')
+    : null;
 
   // Older cases saved before this field existed still have technician data but no repairMethod —
   // treat those as "Local Technician" rather than showing a blank picker.
@@ -209,9 +217,7 @@ export const RmaTracker = () => {
     setSerialInput('');
     setResolvedNote('');
     setLogText('');
-    setLogInternal(false);
     setLogStatus('');
-    setLogView('all');
   };
 
   const closeCase = () => {
@@ -286,6 +292,11 @@ export const RmaTracker = () => {
       setFormError('Give the case a customer name or at least one serial number, so it can be found again.');
       return;
     }
+    // Asked BEFORE reserveRmaNumber below: that counter is shared and monotonic, so a number burnt
+    // on a cancelled dialog can never be handed back.
+    if (isNew && !window.confirm(
+      'Create this RMA case?\n\nOnce it exists, only its status and its log can be changed — by anyone, including an administrator. Everything else is recorded as it stands now.'
+    )) return;
     setSaving(true);
     setFormError('');
     try {
@@ -305,19 +316,21 @@ export const RmaTracker = () => {
   };
 
   const handleAddLog = async () => {
-    if (!logText.trim() || !draft?.id) return;
+    if (!draft?.id) return;
+    if (!logText.trim() && !logStatus) return;
+    if (logStatus === 'closed' && !window.confirm(
+      `Close RMA ${draft.rmaNo}?\n\nA closed case is final — nobody, including an administrator, can move its status or add to its log afterwards.`
+    )) return;
     setLogBusy(true);
     setFormError('');
     try {
       const saved = await storageService.appendRmaEntry(draft.id, {
         text: logText,
-        internal: logInternal,
         status: logStatus || undefined
       });
       setDraft({ ...saved });
       setLogText('');
       setLogStatus('');
-      setLogInternal(false);
     } catch (err) {
       setFormError(`Could not add that entry: ${err.message}`);
     }
@@ -347,12 +360,10 @@ export const RmaTracker = () => {
     storageService.logExport('rma', 'xlsx', filtered.length);
   };
 
-  const timeline = useMemo(() => {
-    const all = [...(draft?.timeline || [])].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-    if (logView === 'internal') return all.filter((e) => e.internal);
-    if (logView === 'customer') return all.filter((e) => !e.internal);
-    return all;
-  }, [draft?.timeline, logView]);
+  const timeline = useMemo(
+    () => [...(draft?.timeline || [])].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)),
+    [draft?.timeline]
+  );
 
   const statusTabs = [
     { id: 'open', label: `Open (${cases.filter(isRmaOpen).length})` },
@@ -496,7 +507,11 @@ export const RmaTracker = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {visible.map((c) => {
-                    const latest = [...(c.timeline || [])].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))[0];
+                    // The pill beside this already says where the case stands, so the line beneath it
+                    // prefers the newest entry someone actually typed — an auto-logged status move on
+                    // its own would only repeat the pill.
+                    const entries = [...(c.timeline || [])].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+                    const latest = entries.find((e) => !(e.statusTo && e.text === rmaStatusChangeText(e.statusFrom, e.statusTo))) || entries[0];
                     const age = daysOpen(c);
                     return (
                       <tr
@@ -596,8 +611,9 @@ export const RmaTracker = () => {
 
             {fieldsDisabled && (
               <p className="text-[11px] font-semibold text-slate-600 bg-slate-50 border-2 border-slate-200 rounded-xl p-3">
-                You can add log entries and move the status. Editing the rest of an existing case is
-                restricted to administrators — the server enforces that, so the fields below are shown read-only.
+                A case is recorded as it stood when it was received. From then on only its status and its
+                log change — for every account, administrators included — so everything below is read-only.
+                To correct a detail here, an administrator can re-import the case from Excel.
               </p>
             )}
 
@@ -613,8 +629,6 @@ export const RmaTracker = () => {
                 <input type="date" value={dateInputValue(draft.receivedDate)} disabled={fieldsDisabled}
                   onChange={(e) => set({ receivedDate: dateInputToIso(e.target.value) })} className={INPUT_CLS} />
               </div>
-              <Select label="RMA Status" value={draft.status} disabled={false}
-                onChange={(v) => set({ status: v })} options={RMA_STATUSES} sub="stack — see log below" />
             </Group>
 
             <Group title="Unit & Complaint" owner="RMA Coordinator" cols={1}>
@@ -722,11 +736,10 @@ export const RmaTracker = () => {
               <Select label="Warranty Status" value={draft.warrantyStatus} disabled={fieldsDisabled}
                 onChange={(v) => set({ warrantyStatus: v })} options={RMA_WARRANTY_STATUSES} blankOption="Not set" />
               <Select label="Warranty From" value={draft.warrantyFrom} disabled={fieldsDisabled}
-                onChange={(v) => set({ warrantyFrom: v })} options={RMA_WARRANTY_SOURCES} blankOption="Not set" />
-              {draft.warrantyFrom === 'local_market' && (
-                <Field label="Local Market Supplier Name" value={draft.warrantyFromSupplier} disabled={fieldsDisabled}
-                  onChange={(v) => set({ warrantyFromSupplier: v })} placeholder="Which supplier in the local market?" />
-              )}
+                onChange={(v) => set({ warrantyFrom: v })} options={rmaWarrantySourceOptions(draft.warrantyFrom)} blankOption="Not set" />
+              <Field label="Warranty Supplier / Distributor Name" value={draft.warrantyFromSupplier} disabled={fieldsDisabled}
+                onChange={(v) => set({ warrantyFromSupplier: v })} placeholder="Who is the warranty claimed through?"
+                hint="The party the claim goes to — not necessarily who the unit was bought from above." />
             </Group>
 
             <Group title="Repair & Approval" owner="Management" cols={1}>
@@ -797,32 +810,38 @@ export const RmaTracker = () => {
               )}
             </Group>
 
-            {/* --- TIMELINE (RMA STATUS, in stack format) --- */}
-            <div className="border-2 border-slate-200 rounded-xl p-4 bg-white space-y-3">
+            {/* --- STATUS + LOG: the only part of an existing case that can still change --- */}
+            <div className="border-2 border-[#2563eb]/30 rounded-xl p-4 bg-white space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2">
                 <h4 className="font-heading font-black text-xs text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <History className="w-4 h-4 text-[#2563eb]" /> RMA Status Log
+                  <History className="w-4 h-4 text-[#2563eb]" /> RMA Status &amp; Log
                 </h4>
-                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
-                  {[
-                    { id: 'all', label: 'All' },
-                    { id: 'customer', label: 'Customer-facing' },
-                    { id: 'internal', label: 'Internal' }
-                  ].map((v) => (
-                    <button key={v.id} type="button" onClick={() => setLogView(v.id)}
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
-                        logView === v.id ? 'bg-white text-[#2563eb] shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                      }`}>
-                      {v.label}
-                    </button>
-                  ))}
-                </div>
+                {/* The status lives here now, so this is the only place it is shown. */}
+                <span className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-lg border ${rmaStatusClasses(draft.status)}`}>
+                  {rmaStatus(draft.status).label}
+                </span>
               </div>
 
               {isNew ? (
                 <p className="text-[11px] font-semibold text-slate-500">Save the case first, then log what happens to it.</p>
+              ) : concluded ? (
+                <p className="text-[11px] font-semibold text-slate-600 bg-slate-50 border-2 border-slate-200 rounded-xl p-3">
+                  Closed{closedEntry ? ` on ${rmaDisplayDate(closedEntry.date)}${closedEntry.byName ? ` by ${closedEntry.byName}` : ''}` : ''}.
+                  A closed case is final — its status and log can no longer be changed by anyone. If something
+                  in it is wrong, an administrator can correct it by re-importing the case from Excel.
+                </p>
               ) : (
                 <div className="space-y-2">
+                  <div className="form-group mb-0">
+                    <label className={LABEL_CLS}>RMA Status</label>
+                    <select value={logStatus} onChange={(e) => setLogStatus(e.target.value)}
+                      className={`${INPUT_CLS} py-2 text-xs w-full`}>
+                      <option value="">Leave status as “{rmaStatus(draft.status).label}”</option>
+                      {RMA_STATUSES.filter((s) => s.key !== draft.status).map((s) => (
+                        <option key={s.key} value={s.key}>Move to “{s.label}”</option>
+                      ))}
+                    </select>
+                  </div>
                   <textarea
                     rows={2}
                     value={logText}
@@ -830,20 +849,11 @@ export const RmaTracker = () => {
                     placeholder="What happened today? e.g. Unit submitted to supplier for warranty claim, slip no. 20409"
                     className={`${INPUT_CLS} font-semibold text-slate-800 resize-none w-full`}
                   />
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                    <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600 flex-shrink-0">
-                      <input type="checkbox" checked={logInternal} onChange={(e) => setLogInternal(e.target.checked)}
-                        className="accent-[#2563eb] w-4 h-4" />
-                      Internal only
-                    </label>
-                    <select value={logStatus} onChange={(e) => setLogStatus(e.target.value)}
-                      className={`${INPUT_CLS} py-2 text-xs flex-1`}>
-                      <option value="">Leave status as “{rmaStatus(draft.status).label}”</option>
-                      {RMA_STATUSES.filter((s) => s.key !== draft.status).map((s) => (
-                        <option key={s.key} value={s.key}>Move to “{s.label}”</option>
-                      ))}
-                    </select>
-                    <button type="button" onClick={handleAddLog} disabled={logBusy || !logText.trim()}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <p className="text-[10px] font-semibold text-slate-500">
+                      A status move on its own is logged automatically, under your name.
+                    </p>
+                    <button type="button" onClick={handleAddLog} disabled={logBusy || (!logText.trim() && !logStatus)}
                       className="btn btn-primary py-2 px-4 text-xs font-bold disabled:opacity-60 flex-shrink-0">
                       {logBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />} Add Entry
                     </button>
@@ -855,17 +865,10 @@ export const RmaTracker = () => {
                 {timeline.length === 0 ? (
                   <p className="text-[11px] font-semibold text-slate-400 py-2">Nothing logged yet.</p>
                 ) : timeline.map((e) => (
-                  <div key={e.id} className={`rounded-xl border-2 p-3 ${e.internal ? 'border-slate-200 bg-slate-50' : 'border-blue-100 bg-blue-50/40'}`}>
+                  <div key={e.id} className="rounded-xl border-2 border-slate-200 bg-slate-50 p-3">
                     <div className="flex items-center justify-between gap-2 mb-1">
                       <span className="text-[10px] font-black font-mono text-slate-500">{rmaDisplayDate(e.date)}</span>
-                      <div className="flex items-center gap-2">
-                        {e.byName && <span className="text-[10px] font-bold text-slate-400">{e.byName}</span>}
-                        {e.internal && (
-                          <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 bg-slate-200 px-1.5 py-0.5 rounded">
-                            Internal
-                          </span>
-                        )}
-                      </div>
+                      {(e.byName || e.by) && <span className="text-[10px] font-bold text-slate-400">{e.byName || e.by}</span>}
                     </div>
                     <p className="text-xs font-semibold text-slate-800 whitespace-pre-wrap">{e.text}</p>
                   </div>
