@@ -186,6 +186,9 @@ service cloud.firestore {
         // Identity + original biller stay immutable, items may only GROW, and a standard user can
         // only ever leave the status at 'draft' or set it to 'final' (never 'cancelled'). Blocked
         // once the draft has expired (admins bypass above).
+        // `activeEditor` rides along on this branch: it is the "I am adding to this bill right now"
+        // stamp the Drafts tab shows to the rest of the region, and it is writable only on an open
+        // draft of your own team, like everything else here.
         // Only an OPEN DRAFT may be extended. A finalized sale is closed: previously this branch
         // let a standard user append units to a bill that was already final, and even flip its
         // status back to 'draft' (the status test allowed both values in either direction). No
@@ -200,7 +203,7 @@ service cloud.firestore {
             && request.resource.data.items.size() >= resource.data.items.size()
             && request.resource.data.status in ['draft', 'final']
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['items', 'status', 'draftExpiresAt', 'updatedAt',
+                 .hasOnly(['items', 'status', 'draftExpiresAt', 'updatedAt', 'activeEditor',
                            'appendedBy', 'appendedByName', 'finalizedBy', 'finalizedByName', 'finalizedAt']));
     }
 

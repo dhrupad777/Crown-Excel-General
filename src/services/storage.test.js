@@ -1066,3 +1066,75 @@ describe('RMA case log', () => {
     expect(() => storageService.appendRmaEntry('rma-nope', { text: 'hello' })).toThrow(/no longer exists/i);
   });
 });
+
+// Two stores on one draft at the same time billed the same units twice. The claim is how a store
+// is told to stay off a bill someone else is on, so its edges — who holds it, when it goes stale,
+// and that publishing it never touches the bill's items — are what matter.
+describe('draft claims (who is adding to a bill right now)', () => {
+  const FRESH = () => Date.now() - 10 * 1000;
+  const STALE = () => Date.now() - 10 * 60 * 1000;
+  const holder = (over = {}) => ({ email: 'ali@ceg.ae', name: 'Ali', locationId: 'loc-2', locationName: 'Deira', at: FRESH(), ...over });
+
+  const seedDraft = (over = {}) => {
+    localStorage.setItem('crown_excel_invoices_v2', JSON.stringify([{
+      id: 'Dubai__D1', invoiceNo: 'D1', teamId: 'Dubai', status: 'draft',
+      customer: { company: 'ACME' }, items: [{ name: 'MBP', imei: 'SN1' }], ...over
+    }]));
+  };
+
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([
+      { id: 'loc-1', name: 'Head Office', team: 'Dubai', active: true },
+      { id: 'loc-2', name: 'Deira', team: 'Dubai', active: true }
+    ]));
+    storageService.setCurrentUser({ email: 'me@ceg.ae', displayName: 'Me', role: 'standard', locationId: 'loc-1' });
+    seedDraft();
+  });
+
+  it('reports a live claim and ignores one nobody has refreshed', () => {
+    expect(storageService.draftLockHolder({ activeEditor: holder() })).toMatchObject({ email: 'ali@ceg.ae' });
+    expect(storageService.draftLockHolder({ activeEditor: holder({ at: STALE() }) })).toBeNull();
+    expect(storageService.draftLockHolder({ activeEditor: null })).toBeNull();
+    expect(storageService.draftLockHolder({ activeEditor: { email: 'x@y.z' } })).toBeNull(); // no timestamp
+    expect(storageService.draftLockHolder({})).toBeNull();
+  });
+
+  it('a claim of my own is not someone else’s, whatever case the email is in', () => {
+    expect(storageService.draftLockedByOther({ activeEditor: holder() })).toMatchObject({ email: 'ali@ceg.ae' });
+    expect(storageService.draftLockedByOther({ activeEditor: holder({ email: 'ME@ceg.ae' }) })).toBeNull();
+    expect(storageService.draftLockedByOther({ activeEditor: holder({ at: STALE() }) })).toBeNull();
+  });
+
+  it('claiming stamps who and where, and publishes ONLY that field — never the bill’s items', async () => {
+    await storageService.claimDraftLock('Dubai__D1');
+
+    expect(storageService.getInvoiceById('Dubai__D1').activeEditor).toMatchObject({
+      email: 'me@ceg.ae', name: 'Me', locationId: 'loc-1', locationName: 'Head Office'
+    });
+    expect(firebaseService.updateDocStrict).toHaveBeenCalledWith(
+      'invoices', 'Dubai__D1', { activeEditor: expect.objectContaining({ email: 'me@ceg.ae' }) }
+    );
+    // Writing the whole bill from this device is exactly what overwrote another store's units.
+    expect(firebaseService.saveToCloud).not.toHaveBeenCalled();
+    expect(firebaseService.saveToCloudStrict).not.toHaveBeenCalled();
+    expect(storageService.getInvoiceById('Dubai__D1').items).toHaveLength(1);
+  });
+
+  it('releasing hands the bill back', async () => {
+    await storageService.claimDraftLock('Dubai__D1');
+    await storageService.releaseDraftLock('Dubai__D1');
+    expect(storageService.getInvoiceById('Dubai__D1').activeEditor).toBeNull();
+    expect(storageService.draftLockHolder(storageService.getInvoiceById('Dubai__D1'))).toBeNull();
+  });
+
+  it('does not write to the cloud for a bill that is already final', async () => {
+    seedDraft({ status: 'final' });
+    await storageService.claimDraftLock('Dubai__D1');
+    expect(firebaseService.updateDocStrict).not.toHaveBeenCalled();
+  });
+
+  it('shrugs off a bill id it has never seen', async () => {
+    expect(await storageService.claimDraftLock('nope')).toBeNull();
+    expect(firebaseService.updateDocStrict).not.toHaveBeenCalled();
+  });
+});

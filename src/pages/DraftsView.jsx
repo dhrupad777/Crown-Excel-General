@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileEdit, Clock, AlertTriangle, PlusCircle, CheckCircle2, XCircle, Loader2, MapPin } from 'lucide-react';
+import { FileEdit, Clock, AlertTriangle, PlusCircle, CheckCircle2, XCircle, Loader2, MapPin, Lock } from 'lucide-react';
 import { storageService } from '../services/storage';
 import { customerPrimaryName } from '../utils/customer';
 import { useAuth } from '../context/AuthContext';
@@ -15,6 +15,13 @@ const timeLeft = (expiresAt) => {
   if (h >= 24) return { expired: false, label: `${Math.floor(h / 24)}d ${h % 24}h left` };
   if (h >= 1) return { expired: false, label: `${h}h left` };
   return { expired: false, label: `${Math.max(1, Math.floor(ms / (60 * 1000)))}m left` };
+};
+
+// How long ago the store holding a bill last touched it, for the "in use" badge.
+const sinceLabel = (at) => {
+  const mins = Math.floor((Date.now() - Number(at)) / 60000);
+  if (mins <= 0) return 'just now';
+  return `${mins}m ago`;
 };
 
 const storeChips = (inv) => {
@@ -55,6 +62,21 @@ export const DraftsView = ({ onContinueDraft }) => {
       alert(e.message);
     }
     setBusy('');
+  };
+
+  // Opening a bill someone else is on is what caused the same units to be billed twice. Staff are
+  // blocked outright (the button is disabled); an admin may still take it over deliberately.
+  const addItems = (inv, heldByOther) => {
+    if (heldByOther) {
+      if (!isAdmin) return;
+      const ok = window.confirm(
+        `${heldByOther.name || heldByOther.email} (${heldByOther.email}) from ${heldByOther.locationName || 'another store'} is adding to ${inv.invoiceNo || inv.id} right now — last activity ${sinceLabel(heldByOther.at)}.
+
+Take the bill over anyway? Speak to them first, or you may both scan the same units.`
+      );
+      if (!ok) return;
+    }
+    onContinueDraft?.(inv.id);
   };
 
   const cancel = async (inv) => {
@@ -112,6 +134,9 @@ export const DraftsView = ({ onContinueDraft }) => {
               const expired = tl.expired;
               const units = (inv.items || []).reduce((s, i) => s + (i.qty || 0), 0);
               const canStaffAct = !expired || isAdmin;
+              // Another store is on this bill right now. Staff are kept off it entirely; an admin
+              // can take it over, having been told exactly who they would be cutting across.
+              const heldByOther = storageService.draftLockedByOther(inv);
               return (
                 <div key={inv.id} className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${expired ? 'bg-red-50/50' : ''}`}>
                   <div className="min-w-0">
@@ -120,6 +145,11 @@ export const DraftsView = ({ onContinueDraft }) => {
                       <span className={`inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${expired ? 'text-red-700 bg-red-100 border-red-200' : 'text-amber-700 bg-amber-50 border-amber-200'}`}>
                         <Clock className="w-3 h-3" /> {tl.label}
                       </span>
+                      {heldByOther && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-[#2563eb] bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                          <Lock className="w-3 h-3" /> In use · {heldByOther.locationName || 'another store'} · {sinceLabel(heldByOther.at)}
+                        </span>
+                      )}
                       {isAdmin && inv.teamId && (
                         <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">
                           <MapPin className="w-3 h-3" /> {inv.teamId}
@@ -127,6 +157,11 @@ export const DraftsView = ({ onContinueDraft }) => {
                       )}
                     </div>
                     <div className="text-[11px] font-bold text-slate-600 mt-1">{customerPrimaryName(inv.customer)} · {units} unit{units === 1 ? '' : 's'}</div>
+                    {heldByOther && (
+                      <div className="text-[11px] font-bold text-[#2563eb] mt-1">
+                        {heldByOther.name || heldByOther.email} ({heldByOther.email}) is adding to this bill — coordinate before you scan the same units.
+                      </div>
+                    )}
                     {storeChips(inv).length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1.5">
                         {storeChips(inv).map((s) => (
@@ -139,11 +174,15 @@ export const DraftsView = ({ onContinueDraft }) => {
                   <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
                     {!expired && (
                       <button
-                        onClick={() => onContinueDraft?.(inv.id)}
-                        className="btn btn-outline text-xs py-2 px-3 font-bold flex items-center gap-1.5"
-                        title="Add your store's serials to this draft"
+                        onClick={() => addItems(inv, heldByOther)}
+                        disabled={Boolean(heldByOther) && !isAdmin}
+                        className="btn btn-outline text-xs py-2 px-3 font-bold flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={heldByOther
+                          ? `${heldByOther.name || heldByOther.email} (${heldByOther.email}) from ${heldByOther.locationName || 'another store'} is adding to this bill${isAdmin ? ' — an admin can take it over' : ''}`
+                          : "Add your store's serials to this draft"}
                       >
-                        <PlusCircle className="w-4 h-4 text-[#2563eb]" /> Add items
+                        {heldByOther ? <Lock className="w-4 h-4 text-slate-400" /> : <PlusCircle className="w-4 h-4 text-[#2563eb]" />}
+                        {heldByOther ? 'In use' : 'Add items'}
                       </button>
                     )}
                     {canStaffAct && (

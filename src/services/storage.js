@@ -29,6 +29,12 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const BACKUP_MAX = 12; // keep a rolling ~3 months of weekly snapshots on-device
 const DRAFT_WINDOW_MS = 2 * 24 * 60 * 60 * 1000; // a draft invoice stays open for max 2 days
 
+// How long a store's claim on an open draft stands without being refreshed. Short on purpose: it
+// has to outlive a slow scan but free itself quickly when a laptop is shut or a tab is closed, so
+// a bill is never stranded. The Billing Desk refreshes its claim every DRAFT_LOCK_HEARTBEAT_MS.
+const DRAFT_LOCK_TTL_MS = 3 * 60 * 1000;
+export const DRAFT_LOCK_HEARTBEAT_MS = 45 * 1000;
+
 const INVOICE_NUMBER_START = 10000;
 
 class StorageService {
@@ -885,6 +891,17 @@ class StorageService {
     return invoices.find(inv => inv.id === id) || null;
   }
 
+  // The cloud's own copy of a bill, falling back to this device's mirror when offline. Continue
+  // mode must build on this rather than on the snapshot it opened with: another store may have
+  // appended units in the meantime, and writing the stale snapshot back would erase them.
+  async getFreshInvoice(id) {
+    if (firebaseService.isInitialized) {
+      const res = await firebaseService.getDocOnce('invoices', id);
+      if (res?.exists && res.data) return res.data;
+    }
+    return this.getInvoiceById(id);
+  }
+
   // --- DRAFTS ---
   // A draft is an open bill (status 'draft') that stores in a region append serials to over up to
   // 2 days, then save as final. Absent status = 'final' so every legacy invoice is unaffected.
@@ -912,6 +929,73 @@ class StorageService {
   // Expiry timestamp for a brand-new draft (creation + the 2-day window).
   draftExpiry() {
     return Date.now() + DRAFT_WINDOW_MS;
+  }
+
+  // --- WHO IS ADDING TO THIS DRAFT RIGHT NOW ---
+  // Two stores adding to one draft at the same time is how a bill ended up holding the same units
+  // twice: each Billing Desk had its own snapshot of the draft, so neither saw the other's scans.
+  // A draft therefore carries `activeEditor` — who holds it, from which store, and when they last
+  // touched it. It is written on its own (never through saveInvoice, which would push a stale copy
+  // of `items` over the other store's work) and it expires by itself, so a closed laptop or a
+  // crashed tab frees the bill instead of stranding it.
+
+  // The live holder of a draft, or null when nobody holds it (or the claim has gone stale).
+  draftLockHolder(inv) {
+    const held = inv?.activeEditor;
+    const at = Number(held?.at);
+    if (!held?.email || !Number.isFinite(at)) return null;
+    return Date.now() - at > DRAFT_LOCK_TTL_MS ? null : held;
+  }
+
+  // The holder when it is SOMEONE ELSE — the case every caller actually asks about. Matched on
+  // email, so the same person coming back on another device simply picks their own bill back up.
+  draftLockedByOther(inv) {
+    const holder = this.draftLockHolder(inv);
+    const me = String(this._currentUser?.email || '').toLowerCase();
+    return holder && String(holder.email).toLowerCase() !== me ? holder : null;
+  }
+
+  // Claim or refresh this device's hold on a draft. Best-effort by design: it must never block or
+  // break billing, so a cloud failure is logged and the operator carries on (the other store just
+  // won't see the claim). Returns the stamp that was written.
+  async claimDraftLock(id) {
+    const me = this._currentUser || {};
+    const stamp = {
+      email: me.email || '',
+      name: me.displayName || me.email || '',
+      locationId: me.locationId || '',
+      locationName: this.getLocationName(me.locationId) || '',
+      at: Date.now()
+    };
+    return this._writeDraftLock(id, stamp);
+  }
+
+  // Give the bill back. Called when the Billing Desk leaves continue mode; the TTL is the backstop
+  // for every path that never gets to run it.
+  async releaseDraftLock(id) {
+    return this._writeDraftLock(id, null);
+  }
+
+  async _writeDraftLock(id, stamp) {
+    const all = this._readRawSafe(STORAGE_KEYS.INVOICES);
+    const target = all.find((r) => r.id === id);
+    if (!target) return null;
+    // Local first so this store's own UI is right even offline, then the single field to the cloud.
+    // A merge write, NOT saveInvoice: `items` must stay exactly as the cloud has it.
+    if (this._setItem(STORAGE_KEYS.INVOICES, all.map((r) => (r.id === id ? { ...r, activeEditor: stamp } : r)))) {
+      window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
+    }
+    // Only an open draft carries a claim. Once the bill is final the field is dead weight, and the
+    // security rules rightly refuse a standard account's write to a finalized sale — so don't make
+    // one just to tidy up.
+    if (target.status === 'draft') {
+      try {
+        await firebaseService.updateDocStrict('invoices', id, { activeEditor: stamp });
+      } catch (err) {
+        console.warn('Draft lock not published to the cloud:', err.message);
+      }
+    }
+    return stamp;
   }
 
   // True if a bill in the given team already carries this number. Numbers are per-team now (Dubai's

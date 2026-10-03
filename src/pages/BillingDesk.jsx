@@ -32,7 +32,7 @@ import { ImportSerialsModal } from '../components/ImportSerialsModal';
 import { InvoicePrintDocument } from '../components/InvoicePrintDocument';
 import { groupInvoiceItems } from '../utils/invoice';
 import { useAuth } from '../context/AuthContext';
-import { storageService } from '../services/storage';
+import { storageService, DRAFT_LOCK_HEARTBEAT_MS } from '../services/storage';
 import { audioService } from '../services/audio';
 import { guessProductDefaults } from '../utils/productDefaults';
 import { matchesProductQuery } from '../utils/productSearch';
@@ -402,12 +402,38 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
       const finalStamp = mode === 'final'
         ? { status: 'final', finalizedBy: me.email || '', finalizedByName: me.displayName || '', finalizedAt: new Date().toISOString() }
         : { status: 'draft' };
-      // Continuing: append onto the existing bill's items, leaving identity/partner/biller intact.
-      // Its draftExpiresAt is preserved (hard 2-day cap from creation, not reset on each edit).
+      // Continuing: append onto the bill as it stands RIGHT NOW, not as it stood when this desk
+      // opened it. Two stores working one draft at the same time used to cost both ways — the
+      // stale snapshot overwrote the other store's units, and its units were invisible to this
+      // desk's duplicate check, so the same unit could be billed twice. Re-reading the live bill
+      // and dropping serials it already carries closes both.
+      let base = continuing;
+      let mine = items;
+      if (continuing) {
+        base = (await storageService.getFreshInvoice(continuing.id)) || continuing;
+        const onBill = new Set(
+          (base.items || []).map((it) => String(it.imei || '').trim().toUpperCase()).filter(Boolean)
+        );
+        mine = items.filter((it) => !onBill.has(String(it.imei || '').trim().toUpperCase()));
+        const dropped = items.length - mine.length;
+        if (dropped > 0) {
+          const addedBy = base.appendedByName || base.appendedBy || 'another store';
+          alert(
+            `${dropped} serial${dropped === 1 ? '' : 's'} on your screen ${dropped === 1 ? 'is' : 'are'} already on this bill — ${addedBy} added ${dropped === 1 ? 'it' : 'them'} while you were scanning.
+
+` +
+            `${dropped === 1 ? 'It has' : 'They have'} been left off so the unit isn't billed twice.`
+          );
+        }
+        if (mine.length === 0) {
+          alert('Every unit you scanned is already on this bill. Nothing further was added.');
+          return;
+        }
+      }
       const invoiceData = continuing
         ? {
-            ...continuing,
-            items: [...(continuing.items || []), ...items],
+            ...base,
+            items: [...(base.items || []), ...mine],
             appendedBy: me.email || '',
             appendedByName: me.displayName || '',
             updatedAt: new Date().toISOString(),
@@ -501,6 +527,24 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
     setItems([]);
   };
 
+  // While this desk is on a draft, hold it and keep telling the region so — the Drafts tab shows
+  // the claim to every other store and won't let them open the same bill. The heartbeat is what
+  // makes it safe: stop refreshing (tab closed, laptop shut, browser crashed) and the claim goes
+  // stale on its own within a few minutes rather than stranding the bill.
+  useEffect(() => {
+    const id = continuing?.id;
+    if (!id) return;
+    storageService.claimDraftLock(id);
+    const beat = setInterval(() => storageService.claimDraftLock(id), DRAFT_LOCK_HEARTBEAT_MS);
+    const release = () => storageService.releaseDraftLock(id);
+    window.addEventListener('beforeunload', release);
+    return () => {
+      clearInterval(beat);
+      window.removeEventListener('beforeunload', release);
+      release();
+    };
+  }, [continuing?.id]);
+
   // The Drafts tab can deep-link a specific draft into continue mode ("Add items").
   useEffect(() => {
     if (!continueDraftId) return;
@@ -544,7 +588,7 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
                 <div className="text-xs font-bold text-amber-800 flex items-center gap-2">
                   <Layers className="w-4 h-4 flex-shrink-0" />
                   <span>
-                    Adding to draft <b className="font-mono">{continuing.invoiceNo || continuing.id}</b> — {lockedItems.length} existing unit{lockedItems.length === 1 ? '' : 's'}. New units are added to your store.
+                    Adding to draft <b className="font-mono">{continuing.invoiceNo || continuing.id}</b> — {lockedItems.length} existing unit{lockedItems.length === 1 ? '' : 's'}. New units are added to your store. While this is open, the Drafts tab shows other stores that you are on this bill and keeps them off it.
                   </span>
                 </div>
                 <button type="button" onClick={cancelContinuing} className="text-xs font-black text-amber-700 hover:text-amber-900 bg-white border-2 border-amber-300 px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
