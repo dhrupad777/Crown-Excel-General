@@ -6,6 +6,7 @@ import { firebaseService, serverTimestamp } from './firebase';
 import { normalizeSerial, BOOTSTRAP_ADMIN_EMAILS, DELETION_RETENTION_DAYS, normalizePermissions } from '../config/appConfig';
 import { RMA_STATUS_KEYS, DEFAULT_RMA_STATUS, isRmaOpen, isRmaConcluded, rmaStatusChangeText } from '../config/rma';
 import { idbPutBundle, idbGetBundle, idbDeleteBundle } from '../utils/backupStore';
+import { mirrorAvailable, mirrorReadAll, mirrorWrite, mirrorDelete } from '../utils/mirrorStore';
 
 const STORAGE_KEYS = {
   PRODUCTS: 'crown_excel_products_v2',
@@ -24,6 +25,17 @@ const STORAGE_KEYS = {
   // Weekly-backup bookkeeping: last run timestamp + whether the auto-download is enabled.
   BACKUP_META: 'crown_excel_backup_meta_v2'
 };
+
+// The four collections that actually grow: they live in IndexedDB (see utils/mirrorStore), not
+// localStorage, whose ~5MB site cap the invoice mirror used to hit — at which point the device
+// could no longer save a bill at all. Everything else here is small, is read synchronously at
+// startup, and stays in localStorage exactly as before.
+const MIRRORED_KEYS = [
+  STORAGE_KEYS.PRODUCTS,
+  STORAGE_KEYS.CUSTOMERS,
+  STORAGE_KEYS.INVOICES,
+  STORAGE_KEYS.RMA
+];
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const BACKUP_MAX = 12; // keep a rolling ~3 months of weekly snapshots on-device
@@ -47,6 +59,11 @@ class StorageService {
     this._currentUser = null;
     // Keys whose local JSON failed to parse — mutations refuse to overwrite these (see _readRawSafe).
     this._corruptKeys = new Set();
+    // The IndexedDB-backed mirror, held in memory so every getter stays synchronous. Empty until
+    // initLocalMirror() runs (main.jsx awaits it before the app renders); until then, and on any
+    // browser without IndexedDB, reads and writes use localStorage exactly as they always did.
+    this._mirror = new Map();
+    this._mirrorReady = false;
     // Retry anything left unconfirmed as soon as the device is back online.
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => { this.retryPendingWrites(); });
@@ -205,7 +222,65 @@ class StorageService {
   }
 
   // Persists to localStorage, surfacing quota/private-browsing failures instead of losing data silently.
+  // Loads the mirror into memory and, on first run, moves it out of localStorage. Awaited by
+  // main.jsx before the app renders, so every synchronous getter below has its data ready.
+  // Failure is not fatal: the service simply stays on localStorage, which is what it used before.
+  async initLocalMirror() {
+    if (this._mirrorReady || !mirrorAvailable()) return this._mirrorReady;
+    try {
+      // Bounded: the app does not render until this resolves, so a database that never opens (a
+      // locked file, a browser mid-upgrade) must not leave a blank screen. Falling back costs only
+      // the cache — every record is in Firestore, and the sync snapshot refills memory on login.
+      this._mirror = await Promise.race([
+        mirrorReadAll(MIRRORED_KEYS),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out opening the local database')), 5000))
+      ]);
+
+      // One-time move across. The localStorage copy is dropped only once IndexedDB has accepted
+      // the rows, so an interrupted migration can lose nothing — and dropping it is what gives the
+      // small keys that stayed behind (pending writes above all) the whole 5MB to themselves.
+      for (const key of MIRRORED_KEYS) {
+        if (this._mirror.has(key)) {
+          try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+          continue;
+        }
+        const legacy = localStorage.getItem(key);
+        if (legacy == null) continue;
+        let rows;
+        try {
+          rows = JSON.parse(legacy);
+        } catch {
+          // Corrupt JSON: leave it alone and let the cloud snapshot rebuild this collection.
+          continue;
+        }
+        await mirrorWrite(key, rows);
+        this._mirror.set(key, rows);
+        try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+      }
+      this._mirrorReady = true;
+    } catch (e) {
+      console.error('Could not open the local mirror; falling back to localStorage:', e.message);
+      this._mirrorReady = false;
+    }
+    return this._mirrorReady;
+  }
+
+  _isMirrored(key) {
+    return this._mirrorReady && MIRRORED_KEYS.includes(key);
+  }
+
   _setItem(key, value) {
+    // In-memory first so the next read is right whatever the disk does, then IndexedDB. The disk
+    // write is not awaited — callers are synchronous — but a failure is surfaced as a sync issue
+    // rather than swallowed, and the cloud (not this cache) is the record of the sale either way.
+    if (this._isMirrored(key)) {
+      this._mirror.set(key, value);
+      mirrorWrite(key, value).catch((e) => {
+        console.error(`Failed to persist [${key}] to the local mirror:`, e);
+        this.logIssue('storage', `This device could not update its offline copy of ${key}: ${e.message}`, { key });
+      });
+      return true;
+    }
     try {
       localStorage.setItem(key, JSON.stringify(value));
       return true;
@@ -312,6 +387,10 @@ class StorageService {
       // only store names/regions, no customer or sale data.
     ]) {
       try { localStorage.removeItem(key); } catch { /* private mode / quota — nothing to remove */ }
+      if (MIRRORED_KEYS.includes(key)) {
+        this._mirror.delete(key);
+        mirrorDelete(key).catch((e) => console.warn(`Could not clear [${key}] from the local mirror:`, e.message));
+      }
     }
     window.dispatchEvent(new CustomEvent("crown-data-change", { detail: { type: "all" } }));
   }
@@ -323,6 +402,10 @@ class StorageService {
   // empty, and the next mutation happily wrote that truncated list back — destroying the mirror.
   // Now it flags the read as unreadable so mutations refuse to overwrite (see _readRawSafe).
   _readRaw(key) {
+    // A copy, not the stored array: callers treat the result as their own (the localStorage path
+    // below hands them a freshly parsed array every time), and a caller mutating it in place must
+    // never reach into the mirror itself.
+    if (this._isMirrored(key)) return (this._mirror.get(key) || []).slice();
     try {
       const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : [];
@@ -1570,17 +1653,26 @@ class StorageService {
       });
     }
 
-    // 7. Local storage headroom — invoices carry full item arrays, so this fills faster than expected.
-    let bytes = 0;
+    // 7. Device storage. The four big collections sit in IndexedDB, which a browser lets grow into
+    // gigabytes; only what is left in localStorage is anywhere near a ceiling, and that ceiling
+    // (~5MB) is what used to stop a bill being saved at all.
+    let smallBytes = 0;
     try {
-      Object.values(STORAGE_KEYS).forEach((k) => { bytes += (localStorage.getItem(k) || '').length; });
+      Object.values(STORAGE_KEYS)
+        .filter((k) => !this._isMirrored(k))
+        .forEach((k) => { smallBytes += (localStorage.getItem(k) || '').length; });
     } catch { /* ignore */ }
-    const mb = bytes / (1024 * 1024);
+    let mirrorRows = 0;
+    this._mirror.forEach((rows) => { mirrorRows += (rows || []).length; });
+    const smallMb = smallBytes / (1024 * 1024);
+    const onIdb = this._mirrorReady;
     findings.push({
       key: 'storage',
       title: 'Device storage',
-      severity: mb > 4 ? 'error' : mb > 3 ? 'warn' : 'ok',
-      summary: `${mb.toFixed(2)} MB used locally${mb > 3 ? ' — approaching the browser limit (~5 MB)' : ''}`,
+      severity: !onIdb && smallMb > 4 ? 'error' : !onIdb && smallMb > 3 ? 'warn' : 'ok',
+      summary: onIdb
+        ? `${mirrorRows.toLocaleString()} records held offline in this device's database, plus ${smallMb.toFixed(2)} MB of settings and pending writes`
+        : `${smallMb.toFixed(2)} MB used locally${smallMb > 3 ? ' — approaching the browser limit (~5 MB). This browser has no device database, so records are held here.' : ''}`,
       items: []
     });
 
