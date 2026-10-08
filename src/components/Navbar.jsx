@@ -45,10 +45,11 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
     const handleDataChange = () => setStats(storageService.getDashboardStats());
     window.addEventListener('crown-data-change', handleDataChange);
 
-    // A cloud/local save failed permanently (not just offline) — surface it so it isn't lost.
+    // A CLOUD save failed permanently (not just offline) — surface it so it isn't lost. A device
+    // that cannot keep its own copy is deliberately NOT surfaced here: the sale is in the cloud
+    // either way, there is nothing to do about it mid-sale, and it is reported in Data Health.
     const handleSyncError = (e) => setSyncIssue({ message: e.detail?.message || 'A save did not reach the cloud.', at: Date.now() });
     window.addEventListener('crown-sync-error', handleSyncError);
-    window.addEventListener('crown-storage-error', handleSyncError);
 
     // Serial registration progress, broadcast by registerSerialsFromInvoice.
     const handleRegistration = (e) => {
@@ -76,7 +77,6 @@ export const Navbar = ({ activeTab, setActiveTab, onOpenSettings }) => {
       window.removeEventListener('network-status-change', handleNetwork);
       window.removeEventListener('crown-data-change', handleDataChange);
       window.removeEventListener('crown-sync-error', handleSyncError);
-      window.removeEventListener('crown-storage-error', handleSyncError);
       window.removeEventListener('crown-registration-progress', handleRegistration);
       window.removeEventListener('crown-pending-change', handlePending);
       window.removeEventListener('crown-issue', handlePending);

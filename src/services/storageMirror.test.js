@@ -52,6 +52,9 @@ beforeEach(async () => {
   vi.clearAllMocks();
   storageService._mirror = new Map();
   storageService._mirrorReady = false;
+  storageService._persist = 'local';
+  storageService._mirrorTroubleNoted = false;
+  storageService._issues = null;
   localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
   storageService.setCurrentUser({ email: 'staff@b.com', role: 'standard', locationId: 'loc-1' });
 });
@@ -62,6 +65,7 @@ describe('the local mirror moves off localStorage', () => {
     localStorage.setItem(PRODUCTS, JSON.stringify([{ id: 'p1', name: 'MacBook' }]));
 
     await storageService.initLocalMirror();
+    await storageService._migration; // the move happens after the app is already rendering
 
     // Moved across…
     expect(_disk.get(INVOICES)).toHaveLength(1);
@@ -79,6 +83,7 @@ describe('the local mirror moves off localStorage', () => {
     localStorage.setItem(INVOICES, JSON.stringify([makeInvoice({ invoiceNo: 'STALE' })]));
 
     await storageService.initLocalMirror();
+    await storageService._migration;
 
     expect(storageService.getInvoices()[0].invoiceNo).toBe('FROM-DB');
     expect(localStorage.getItem(INVOICES)).toBeNull();
@@ -91,13 +96,43 @@ describe('the local mirror moves off localStorage', () => {
     expect(localStorage.getItem(INVOICES)).toBe('{not json'); // kept for the cloud snapshot to replace
   });
 
-  it('falls back to localStorage, exactly as before, if the database will not open', async () => {
+  it('serves the data from memory and keeps writing to localStorage when the database will not open', async () => {
     const { mirrorReadAll } = await import('../utils/mirrorStore');
     mirrorReadAll.mockRejectedValueOnce(new Error('no IndexedDB for you'));
     localStorage.setItem(INVOICES, JSON.stringify([makeInvoice()]));
 
-    expect(await storageService.initLocalMirror()).toBe(false);
+    expect(await storageService.initLocalMirror()).toBe(true);
     expect(storageService.getInvoices()).toHaveLength(1);
+
+    expect(storageService.saveInvoice(makeInvoice({ id: 'Dubai__INV-2', invoiceNo: 'INV-2' }))).not.toBeNull();
+    expect(JSON.parse(localStorage.getItem(INVOICES))).toHaveLength(2); // written down where it can be
+  });
+
+  // The guarantee the shop actually needs: no database, no room in the browser, nothing writable
+  // at all — and not one storage error reaches the operator.
+  it('keeps working with no database AND no room in the browser', async () => {
+    const { mirrorReadAll } = await import('../utils/mirrorStore');
+    mirrorReadAll.mockRejectedValueOnce(new Error('no IndexedDB for you'));
+    await storageService.initLocalMirror();
+
+    const onBanner = vi.fn();
+    window.addEventListener('crown-storage-error', onBanner);
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('QuotaExceededError');
+    });
+
+    expect(storageService.saveInvoice(makeInvoice())).not.toBeNull();
+    expect(storageService.saveProduct({ name: 'MacBook', barcode: '123' })).not.toBeNull();
+    expect(storageService.saveCustomer({ company: 'ACME' })).not.toBeNull();
+
+    // Readable for the rest of the session, straight from memory.
+    expect(storageService.getInvoices()).toHaveLength(1);
+    expect(storageService.getProducts()).toHaveLength(1);
+    // And nothing was thrown at the person at the counter.
+    expect(onBanner).not.toHaveBeenCalled();
+
+    setItem.mockRestore();
+    window.removeEventListener('crown-storage-error', onBanner);
   });
 });
 

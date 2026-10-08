@@ -285,7 +285,7 @@ export const ImportSerialsModal = ({ isOpen, onClose, existingSerials = [], onAd
         category: createForm.category,
         unit: 'Box'
       }, { confirm: true });
-      if (!saved) throw new Error('Could not save locally (device storage may be full).');
+      if (!saved) throw new Error('The product was not saved. Please try again.');
       refreshProducts();
       setOverride(group.key, saved);
       setCreatedCodes((prev) => (prev.includes(group.key) ? prev : [...prev, group.key]));

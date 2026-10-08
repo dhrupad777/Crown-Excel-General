@@ -463,7 +463,9 @@ export const BillingDesk = ({ onViewInvoice, onDirtyChange, continueDraftId }) =
 
     if (!saved) {
       audioService.playError();
-      alert("Failed to save this bill to local storage (device storage may be full). Please free up space or export a backup, then try again.");
+      // Unreachable in normal operation: a bill is saved to the cloud even when this device has no
+      // room to keep its own copy. Kept as a guard, without blaming device storage for it.
+      alert("This bill was not saved. Please try again — nothing has been lost from your screen.");
       return;
     }
 

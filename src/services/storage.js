@@ -64,6 +64,10 @@ class StorageService {
     // browser without IndexedDB, reads and writes use localStorage exactly as they always did.
     this._mirror = new Map();
     this._mirrorReady = false;
+    // Where the mirror is written down: 'idb' once the local database is open, 'local' (the old
+    // localStorage copy) otherwise. Reads never come from either — they come from memory.
+    this._persist = 'local';
+    this._mirrorTroubleNoted = false;
     // Sync/storage issues for this session. null until the first read or write, so a reload still
     // picks up what was persisted before.
     this._issues = null;
@@ -228,54 +232,74 @@ class StorageService {
   // Loads the mirror into memory and, on first run, moves it out of localStorage. Awaited by
   // main.jsx before the app renders, so every synchronous getter below has its data ready.
   // Failure is not fatal: the service simply stays on localStorage, which is what it used before.
+  // Brings the four big collections into memory and decides where they are KEPT. Memory is the
+  // read source from here on, whatever the device can or cannot persist — that is the whole point:
+  // a browser out of room, a disk out of room, a browser with no IndexedDB at all, none of them can
+  // fail a write any more, because the write that matters went to Firestore and the device copy
+  // lives in memory until it can be written down.
+  //
+  // Awaited by main.jsx before the first render, so every synchronous getter has its data ready.
   async initLocalMirror() {
-    if (this._mirrorReady || !mirrorAvailable()) return this._mirrorReady;
-    try {
-      // Bounded: the app does not render until this resolves, so a database that never opens (a
-      // locked file, a browser mid-upgrade) must not leave a blank screen. Falling back costs only
-      // the cache — every record is in Firestore, and the sync snapshot refills memory on login.
-      this._mirror = await Promise.race([
-        mirrorReadAll(MIRRORED_KEYS),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out opening the local database')), 15000))
-      ]);
-      // The READ is what decides the mode: once the rows are in memory, every getter is correct for
-      // this session whatever the disk does afterwards. A write that fails below (a full disk) is
-      // reported, not promoted into a fallback — dropping back to localStorage at that point would
-      // land on the very ceiling this exists to escape.
-      this._mirrorReady = true;
+    if (this._mirrorReady) return true;
+    // Explicit, not inherited: the mode is decided by THIS run, so a failed database read can never
+    // leave writes aimed at a database that isn't there.
+    this._persist = 'local';
 
-      // One-time move across. The localStorage copy is dropped only once IndexedDB has accepted
-      // the rows, so an interrupted migration can lose nothing — and dropping it is what gives the
-      // small keys that stayed behind (pending writes above all) the whole 5MB to themselves.
-      for (const key of MIRRORED_KEYS) {
-        if (this._mirror.has(key)) {
-          try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
-          continue;
-        }
-        const legacy = localStorage.getItem(key);
-        if (legacy == null) continue;
-        let rows;
-        try {
-          rows = JSON.parse(legacy);
-        } catch {
-          // Corrupt JSON: leave it alone and let the cloud snapshot rebuild this collection.
-          continue;
-        }
-        this._mirror.set(key, rows);
-        // Per key, and never fatal: one collection that will not move across must not strand the
-        // other three, and memory already holds the rows either way.
-        try {
-          await mirrorWrite(key, rows);
-          try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
-        } catch (e) {
-          console.warn(`Could not move [${key}] into the local database:`, e.message);
-        }
+    if (mirrorAvailable()) {
+      try {
+        // Bounded: the app does not render until this resolves, so a database that never opens (a
+        // locked file, a browser mid-upgrade) must not leave a blank screen.
+        this._mirror = await Promise.race([
+          mirrorReadAll(MIRRORED_KEYS),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timed out opening the local database')), 8000))
+        ]);
+        this._persist = 'idb';
+      } catch (e) {
+        console.warn('Local database unavailable; keeping the mirror in memory:', e.message);
       }
-    } catch (e) {
-      console.error('Could not open the local mirror; falling back to localStorage:', e.message);
-      this._mirrorReady = false;
     }
-    return this._mirrorReady;
+
+    // Anything the database did not have is read from the old localStorage copy. Synchronous, so
+    // the app can render the moment this returns.
+    const toMigrate = [];
+    for (const key of MIRRORED_KEYS) {
+      if (this._mirror.has(key)) {
+        if (this._persist === 'idb') toMigrate.push(key);
+        continue;
+      }
+      let legacy = null;
+      try { legacy = localStorage.getItem(key); } catch { /* unreadable — treat as absent */ }
+      if (legacy == null) continue;
+      try {
+        this._mirror.set(key, JSON.parse(legacy));
+        if (this._persist === 'idb') toMigrate.push(key);
+      } catch {
+        // Corrupt JSON: leave it where it is and let the cloud snapshot rebuild this collection.
+      }
+    }
+
+    this._mirrorReady = true;
+    // Writing the rows down, and dropping the old localStorage copy once they are down, happens
+    // AFTER this resolves. Nothing waits on it: a database write that never settles would otherwise
+    // hold the whole app on a blank screen, and memory already has everything the app will read.
+    // Kept on the instance so a caller that genuinely needs it finished (a test, a backup about to
+    // read the database) can await it. Nothing in the app's own start-up does.
+    this._migration = this._persist === 'idb' && toMigrate.length > 0
+      ? this._migrateToDatabase(toMigrate)
+      : Promise.resolve();
+    return true;
+  }
+
+  // Best-effort, per key, in the background. Memory is already correct either way.
+  async _migrateToDatabase(keys) {
+    for (const key of keys) {
+      try {
+        await mirrorWrite(key, this._mirror.get(key) || []);
+        try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+      } catch (e) {
+        console.warn(`Could not move [${key}] into the local database:`, e.message);
+      }
+    }
   }
 
   _isMirrored(key) {
@@ -287,32 +311,52 @@ class StorageService {
     // write is not awaited — callers are synchronous — but a failure is surfaced as a sync issue
     // rather than swallowed, and the cloud (not this cache) is the record of the sale either way.
     if (this._isMirrored(key)) {
+      // Memory first and unconditionally: this is the device's copy, and it cannot fail. Writing it
+      // down is a convenience for the next reload — if the database or the browser has no room, the
+      // session carries on and the cloud snapshot refills memory next time. Never returns false.
       this._mirror.set(key, value);
-      mirrorWrite(key, value).catch((e) => {
-        console.error(`Failed to persist [${key}] to the local mirror:`, e);
-        this.logIssue('storage', `This device could not update its offline copy of ${key}: ${e.message}`, { key });
-      });
+      if (this._persist === 'idb') {
+        mirrorWrite(key, value).catch((e) => this._noteMirrorTrouble(key, e));
+      } else {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch (e) {
+          if (this._freeLocalSpace(key)) {
+            try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { /* still no room */ }
+          }
+          this._noteMirrorTrouble(key, e);
+        }
+      }
       return true;
     }
     try {
       localStorage.setItem(key, JSON.stringify(value));
       return true;
     } catch (e) {
-      // Out of room. Every collection below is a cache of Firestore and comes back on the next
-      // snapshot, so the cache gives way rather than the write: drop the OTHER big collections and
-      // try once more. That is usually several megabytes, and it costs nothing that isn't already
-      // in the cloud.
-      if (this._freeLocalSpace(key) ) {
+      // Out of room. Every collection here is a cache of Firestore and comes back on the next
+      // snapshot, so the cache gives way rather than the write: drop the big collections and try
+      // once more. That is usually several megabytes, and it costs nothing that isn't in the cloud.
+      if (this._freeLocalSpace(key)) {
         try {
           localStorage.setItem(key, JSON.stringify(value));
-          this.logIssue('storage', `This device ran out of local space, so its offline copies of the other collections were dropped to save ${key}. They refill from the cloud on the next sync.`, { key });
           return true;
-        } catch { /* still no room — fall through and report honestly */ }
+        } catch { /* still no room */ }
       }
-      console.error(`Failed to persist [${key}] to local storage:`, e);
-      window.dispatchEvent(new CustomEvent('crown-storage-error', { detail: { key, error: e.message } }));
+      // Quiet on purpose. This is the device's own copy, not the record of anything, and raising a
+      // banner mid-sale over it taught operators to click through warnings. It goes to Data Health.
+      this._noteMirrorTrouble(key, e);
       return false;
     }
+  }
+
+  // Said once per session, not once per save: a device with no room writes constantly, and a
+  // hundred identical issues would bury the one line that matters. Never an alert — the operator
+  // is billing, the sale is in the cloud, and there is nothing for them to do about it mid-sale.
+  _noteMirrorTrouble(key, error) {
+    console.warn(`Could not write [${key}] to this device:`, error?.message || error);
+    if (this._mirrorTroubleNoted) return;
+    this._mirrorTroubleNoted = true;
+    this.logIssue('storage', 'This device has no room to keep its offline copy of the data. Everything is being saved to the cloud as normal; free up disk space to restore offline use.', { key });
   }
 
   // Frees localStorage by discarding the cached collections other than the one being written.
@@ -451,9 +495,7 @@ class StorageService {
       return data ? JSON.parse(data) : [];
     } catch (e) {
       console.error(`Local data for [${key}] is unreadable:`, e);
-      window.dispatchEvent(new CustomEvent('crown-storage-error', {
-        detail: { key, error: `Local data for ${key} is corrupted and could not be read.` }
-      }));
+      this.logIssue('storage', `This device's copy of ${key} could not be read and will be rebuilt from the cloud.`, { key });
       this._corruptKeys.add(key);
       return [];
     }
