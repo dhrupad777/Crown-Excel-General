@@ -1138,3 +1138,69 @@ describe('draft claims (who is adding to a bill right now)', () => {
     expect(firebaseService.updateDocStrict).not.toHaveBeenCalled();
   });
 });
+
+// The exact state a client's laptop was in: localStorage full, and (disk nearly full) IndexedDB
+// refusing writes too, so the mirror never engages. Billing stopped for the whole shop because the
+// local write came first and aborted the save. The cloud is the record of the sale — it must go
+// through regardless of what the device can keep.
+describe('a device that cannot store anything can still bill', () => {
+  beforeEach(() => {
+    localStorage.setItem('crown_excel_locations_v2', JSON.stringify([{ id: 'loc-1', team: 'Dubai', active: true }]));
+    storageService.setCurrentUser({ email: 'staff@b.com', role: 'standard', locationId: 'loc-1' });
+  });
+
+  const bill = () => ({
+    id: 'Dubai__INV-9', invoiceNo: 'INV-9', teamId: 'Dubai', status: 'final',
+    customer: { company: 'AL JASARA' },
+    items: [{ name: 'ACER NITRO LITE NL16-71G-76SE', imei: 'SN-9', locationId: 'loc-1' }]
+  });
+
+  it('saves the bill when every single localStorage write throws', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('QuotaExceededError');
+    });
+
+    const saved = await storageService.saveInvoice(bill(), { confirm: true });
+
+    // null is what the Billing Desk turned into "Failed to save this bill to local storage".
+    expect(saved).not.toBeNull();
+    expect(saved.invoiceNo).toBe('INV-9');
+    expect(firebaseService.saveToCloudStrict).toHaveBeenCalledWith('invoices', 'Dubai__INV-9', expect.objectContaining({ invoiceNo: 'INV-9' }));
+    setItem.mockRestore();
+  });
+
+  it('says so plainly instead of failing silently', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('QuotaExceededError');
+    });
+    storageService.saveInvoice(bill());
+    setItem.mockRestore();
+
+    const issue = storageService.getIssues().find((i) => i.kind === 'storage');
+    expect(issue.message).toMatch(/INV-9/);
+    expect(issue.message).toMatch(/saved in the cloud/i);
+  });
+
+  it('frees room by dropping the other cached collections, then retries the write', () => {
+    localStorage.setItem('crown_excel_products_v2', JSON.stringify([{ id: 'p1', name: 'MacBook' }]));
+    localStorage.setItem('crown_excel_customers_v2', JSON.stringify([{ id: 'c1', company: 'ACME' }]));
+    let full = true;
+    const real = Storage.prototype.setItem;
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (key, val) {
+      // Full until the caches are dropped — which is what _freeLocalSpace does.
+      if (full && key === 'crown_excel_invoices_v2') throw new DOMException('QuotaExceededError');
+      return real.call(this, key, val);
+    });
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (key) {
+      full = false;
+      return Storage.prototype.removeItem.wrappedMethod?.call(this, key);
+    });
+
+    expect(storageService.saveInvoice(bill())).not.toBeNull();
+    expect(removeItem).toHaveBeenCalledWith('crown_excel_products_v2');
+    expect(storageService.getInvoices()).toHaveLength(1);
+
+    setItem.mockRestore();
+    removeItem.mockRestore();
+  });
+});

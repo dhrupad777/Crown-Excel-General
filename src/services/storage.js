@@ -64,6 +64,9 @@ class StorageService {
     // browser without IndexedDB, reads and writes use localStorage exactly as they always did.
     this._mirror = new Map();
     this._mirrorReady = false;
+    // Sync/storage issues for this session. null until the first read or write, so a reload still
+    // picks up what was persisted before.
+    this._issues = null;
     // Retry anything left unconfirmed as soon as the device is back online.
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => { this.retryPendingWrites(); });
@@ -233,8 +236,13 @@ class StorageService {
       // the cache — every record is in Firestore, and the sync snapshot refills memory on login.
       this._mirror = await Promise.race([
         mirrorReadAll(MIRRORED_KEYS),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out opening the local database')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out opening the local database')), 15000))
       ]);
+      // The READ is what decides the mode: once the rows are in memory, every getter is correct for
+      // this session whatever the disk does afterwards. A write that fails below (a full disk) is
+      // reported, not promoted into a fallback — dropping back to localStorage at that point would
+      // land on the very ceiling this exists to escape.
+      this._mirrorReady = true;
 
       // One-time move across. The localStorage copy is dropped only once IndexedDB has accepted
       // the rows, so an interrupted migration can lose nothing — and dropping it is what gives the
@@ -253,11 +261,16 @@ class StorageService {
           // Corrupt JSON: leave it alone and let the cloud snapshot rebuild this collection.
           continue;
         }
-        await mirrorWrite(key, rows);
         this._mirror.set(key, rows);
-        try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+        // Per key, and never fatal: one collection that will not move across must not strand the
+        // other three, and memory already holds the rows either way.
+        try {
+          await mirrorWrite(key, rows);
+          try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+        } catch (e) {
+          console.warn(`Could not move [${key}] into the local database:`, e.message);
+        }
       }
-      this._mirrorReady = true;
     } catch (e) {
       console.error('Could not open the local mirror; falling back to localStorage:', e.message);
       this._mirrorReady = false;
@@ -285,10 +298,37 @@ class StorageService {
       localStorage.setItem(key, JSON.stringify(value));
       return true;
     } catch (e) {
+      // Out of room. Every collection below is a cache of Firestore and comes back on the next
+      // snapshot, so the cache gives way rather than the write: drop the OTHER big collections and
+      // try once more. That is usually several megabytes, and it costs nothing that isn't already
+      // in the cloud.
+      if (this._freeLocalSpace(key) ) {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+          this.logIssue('storage', `This device ran out of local space, so its offline copies of the other collections were dropped to save ${key}. They refill from the cloud on the next sync.`, { key });
+          return true;
+        } catch { /* still no room — fall through and report honestly */ }
+      }
       console.error(`Failed to persist [${key}] to local storage:`, e);
       window.dispatchEvent(new CustomEvent('crown-storage-error', { detail: { key, error: e.message } }));
       return false;
     }
+  }
+
+  // Frees localStorage by discarding the cached collections other than the one being written.
+  // Returns true if anything was actually dropped (so the caller knows a retry is worth it).
+  _freeLocalSpace(keepKey) {
+    let freed = false;
+    for (const key of MIRRORED_KEYS) {
+      if (key === keepKey) continue;
+      try {
+        if (localStorage.getItem(key) != null) {
+          localStorage.removeItem(key);
+          freed = true;
+        }
+      } catch { /* nothing to remove */ }
+    }
+    return freed;
   }
 
   // Real-Time Firebase Cloud Synchronization. Idempotent: called by AuthContext every time a
@@ -477,19 +517,23 @@ class StorageService {
 
   // Records a permanent problem for the operator. Unlike the old 30s-expiring banner these persist
   // until an admin resolves them — an error that disappears on a timer is an error nobody fixes.
+  // Held in memory as well as on disk: the issue most worth reading is "this device is full", and
+  // that is exactly the moment localStorage refuses to record it. Memory keeps it for the session
+  // so Data Health and the sync banner can still show what went wrong.
   logIssue(kind, message, meta = {}) {
-    let list = [];
-    try { list = JSON.parse(localStorage.getItem(STORAGE_KEYS.ISSUES) || '[]'); } catch { list = []; }
-    list.unshift({ id: this._newId('issue'), kind, message, meta, at: new Date().toISOString() });
-    try { localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list.slice(0, 200))); } catch { /* quota */ }
+    const entry = { id: this._newId('issue'), kind, message, meta, at: new Date().toISOString() };
+    this._issues = [entry, ...this.getIssues()].slice(0, 200);
+    try { localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(this._issues)); } catch { /* full device — memory only */ }
     window.dispatchEvent(new CustomEvent('crown-issue', { detail: { kind, message } }));
   }
 
   getIssues() {
+    if (this._issues) return this._issues;
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.ISSUES) || '[]'); } catch { return []; }
   }
 
   clearIssues() {
+    this._issues = [];
     try { localStorage.removeItem(STORAGE_KEYS.ISSUES); } catch { /* ignore */ }
     window.dispatchEvent(new CustomEvent('crown-issue', { detail: { cleared: true } }));
   }
@@ -1278,9 +1322,15 @@ class StorageService {
 
     this.validateRecord('invoices', savedInv);
 
-    // 1. Instant 0ms Local Save — the invoice write is the source of truth for this bill,
-    // so a failure here must be surfaced to the operator rather than swallowed.
-    if (!this._setItem(STORAGE_KEYS.INVOICES, updated)) return null;
+    // 1. The device's own copy. It is a CACHE, not the record of the sale — Firestore is that — so
+    // a device that cannot write (full disk, no IndexedDB, blocked site data) must not be able to
+    // stop the shop billing. This used to `return null` here, which the Billing Desk reported as
+    // "failed to save", and the bill never reached the cloud at all: a whole counter stopped over
+    // a cache. The failure is logged and visible in Data Health instead, and the save continues.
+    const mirrored = this._setItem(STORAGE_KEYS.INVOICES, updated);
+    if (!mirrored) {
+      this.logIssue('storage', `This device could not keep its own copy of bill ${savedInv.invoiceNo || savedInv.id} — it is saved in the cloud and will reappear here once space is free.`, { key: STORAGE_KEYS.INVOICES, invoiceNo: savedInv.invoiceNo || savedInv.id });
+    }
 
     window.dispatchEvent(new CustomEvent('crown-data-change', { detail: { type: 'invoices' } }));
 
